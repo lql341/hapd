@@ -21,3 +21,6 @@ __pycache__/
 .hvigor/
 .idea/
 *.log
+
+# machine-local module overlay (secrets)
+hapd.local.tcl

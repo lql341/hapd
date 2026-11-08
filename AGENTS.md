@@ -20,11 +20,20 @@ It is a thin, deterministic wrapper around Huawei's `hdc` and `hap-sign-tool.jar
 
 ## Discovery
 
+`hapd` is installed as an Environment Modules package. Load it before anything
+else; the modulefile sets `PATH` and `HAPD_HOME` and sources the machine-local
+overlay that carries the signing material.
+
 ```bash
-command -v hapd                 # tool present?
+module load hapd            # or: module load hapd/<version>
+command -v hapd             # /path/to/hapd-repo/hapd
 hapd --version
-HAPD_P12_PWD="$SECRET" hapd --json doctor
+hapd --json doctor
 ```
+
+If `hapd` is not found, the module is not loaded — do **not** fall back to
+exporting variables into `.bashrc`. Report the missing module instead. A local
+checkout can always be run directly: `/path/to/hapd-repo/hapd --json doctor`.
 
 `doctor` JSON shape:
 
@@ -54,7 +63,8 @@ Gate on `ok` and on the individual `checks[].name`s you care about.
 
 ## Signing-material resolution
 
-Flag → env → `./signing/` (or `./ednovas/signing/`), newest file per extension.
+Module overlay (`hapd.local.tcl`, sourced by the modulefile) → flag → env →
+`./signing/` (or `./ednovas/signing/`), newest file per extension.
 
 | Purpose | Flag | Env |
 |---|---|---|

@@ -72,24 +72,66 @@ Full walkthrough with screenshots-level detail: [docs/harmonyos-signing.md](docs
 
 ## Install
 
+`hapd` ships as an [Environment Modules](https://modules.readthedocs.io/) package,
+which keeps it out of your shell rc files and lets you pin or roll back versions.
+
 ```bash
-git clone https://github.com/<you>/hapd.git
-ln -s "$PWD/hapd/hapd" ~/.local/bin/hapd     # or copy the file anywhere on PATH
+git clone https://github.com/lql341/hapd.git ~/work/hapd
+cd ~/work/hapd
+./install.sh                       # -> $MODULEFILES_DIR/hapd/<version>
+module load hapd/0.1.0
 hapd --version
 ```
+
+`install.sh` options:
+
+| Option | Effect |
+|---|---|
+| `--module-dir DIR` | Write the modulefile to `DIR/hapd/<version>` (default `$MODULEFILES_DIR` or `~/opt/modulefiles`) |
+| `--no-link` | Skip the convenience symlink in `~/.local/bin` |
+
+If your `MODULEPATH` does not include the module directory yet, add it once in your
+module init file (`module use ~/opt/modulefiles`) — **do not** export hapd's
+variables from `.bashrc`.
+
+No module system? A symlink is enough:
+
+```bash
+ln -s "$PWD/hapd" ~/.local/bin/hapd
+```
+
+### Signing material via the module overlay
+
+`install.sh` creates `hapd.local.tcl` next to the script (git-ignored). The
+generated modulefile sources it on `module load`, so keys never touch your shell
+rc and never enter the repository:
+
+```tcl
+# hapd.local.tcl
+setenv HAPD_P12      /path/to/my-key.p12
+setenv HAPD_CERT     /path/to/my-debug.cer
+setenv HAPD_PROFILE  /path/to/my-debug.p7b
+setenv HAPD_P12_PWD  <keystore password>
+setenv HAPD_ALIAS    my-key
+```
+
+After that, `hapd doctor` and `hapd deploy` need no arguments or environment setup.
+
 
 ## Quick start
 
 ```bash
+module load hapd/0.1.0
+
 # 1. Is everything in place?
-HAPD_P12_PWD='<keystore password>' hapd doctor
+hapd doctor
 
 # 2. Connect the phone (wireless debugging shows "ip:port")
 hapd connect 192.168.1.63:32907
 hapd udid                    # paste this into AGC when registering the device
 
 # 3. Sign + install + launch
-HAPD_P12_PWD='<pw>' hapd deploy app-unsigned.hap
+hapd deploy app-unsigned.hap
 
 # 4. Follow logs
 hapd log --filter myapp
@@ -117,7 +159,7 @@ Global flags: `--json`, `--dry-run`, `--version`.
 
 ### Signing material resolution
 
-Explicit flag → environment → `./signing/` (newest file wins):
+Module overlay → explicit flag → environment → `./signing/` (newest file wins):
 
 | Value | Flag | Env |
 |---|---|---|

@@ -70,24 +70,65 @@ HAP 必须用设备信任的证书签名。**OpenHarmony 社区证书在商业�
 
 ## 安装
 
+`hapd` 以 [Environment Modules](https://modules.readthedocs.io/) 包的形式发布，
+不往 shell 的 rc 文件里写任何东西，还能锁版本、回滚版本。
+
 ```bash
-git clone https://github.com/<you>/hapd.git
-ln -s "$PWD/hapd/hapd" ~/.local/bin/hapd
+git clone https://github.com/lql341/hapd.git ~/work/hapd
+cd ~/work/hapd
+./install.sh                       # -> $MODULEFILES_DIR/hapd/<版本号>
+module load hapd/0.1.0
 hapd --version
 ```
+
+`install.sh` 参数：
+
+| 参数 | 作用 |
+|---|---|
+| `--module-dir DIR` | 把 modulefile 写到 `DIR/hapd/<版本>`（默认 `$MODULEFILES_DIR` 或 `~/opt/modulefiles`） |
+| `--no-link` | 不创建 `~/.local/bin` 下的便捷软链 |
+
+如果你的 `MODULEPATH` 还没包含那个目录，在 module 初始化文件里加一次
+（`module use ~/opt/modulefiles`）——**不要**从 `.bashrc` 里 export hapd 的变量。
+
+没有 modules 环境？一条软链也行：
+
+```bash
+ln -s "$PWD/hapd" ~/.local/bin/hapd
+```
+
+### 用 module 覆盖层放签名材料
+
+`install.sh` 会在脚本旁生成 `hapd.local.tcl`（已加入 .gitignore）。
+生成的 modulefile 在 `module load` 时 source 它，所以密钥既不进 shell rc，
+也不进仓库：
+
+```tcl
+# hapd.local.tcl
+setenv HAPD_P12      /path/to/my-key.p12
+setenv HAPD_CERT     /path/to/my-debug.cer
+setenv HAPD_PROFILE  /path/to/my-debug.p7b
+setenv HAPD_P12_PWD  <密钥库密码>
+setenv HAPD_ALIAS    my-key
+```
+
+配好之后，`hapd doctor` 和 `hapd deploy` 不需要任何参数或环境变量。
+
 
 ## 快速开始
 
 ```bash
+module load hapd/0.1.0
+
 # 1. 环境体检
-HAPD_P12_PWD='<密钥库密码>' hapd doctor
+hapd doctor
 
 # 2. 连手机（无线调试页面会显示 ip:port）
 hapd connect 192.168.1.63:32907
 hapd udid                    # 填到 AGC 注册设备
 
 # 3. 签名 + 安装 + 启动
-HAPD_P12_PWD='<密码>' hapd deploy app-unsigned.hap
+hapd deploy app-unsigned.hap
 
 # 4. 看日志
 hapd log --filter myapp
@@ -115,7 +156,7 @@ hapd log --filter myapp
 
 ### 签名材料的查找顺序
 
-显式参数 → 环境变量 → `./signing/` 下最新文件：
+module 覆盖层 → 显式参数 → 环境变量 → `./signing/` 下最新文件：
 
 | 用途 | 参数 | 环境变量 |
 |---|---|---|
