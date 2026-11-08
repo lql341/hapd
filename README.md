@@ -2,6 +2,8 @@
 
 [中文](README_CN.md) | English
 
+Current release: **0.3.0** · [CHANGELOG.md](CHANGELOG.md)
+
 **Sign, install and debug HarmonyOS HAP packages from Linux — no DevEco Studio, no Windows, no macOS.**
 
 `hapd` is a single-file, dependency-free Python CLI that wraps the official
