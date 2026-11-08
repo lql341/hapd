@@ -104,6 +104,7 @@ Sign only:
 
 ```bash
 hapd sign ./app-unsigned.hap -o ./app-signed.hap
+hapd sign a.hap b.hsp            # several packages, defaults to <name>-signed.<ext>
 ```
 
 Sign + install + launch:
@@ -117,6 +118,14 @@ Fetch a published build and deploy it:
 
 ```bash
 hapd update https://example.com/app-1.2.3-unsigned.hap --dir ./dist
+```
+
+Packages that use a shared bundle must be passed together; `hapd` orders them
+(HSP first with `-s`) and installs sequentially. An `.app` archive is rejected —
+unpack it first:
+
+```bash
+hapd deploy entry-unsigned.hap lib-unsigned.hsp
 ```
 
 Install a pre-signed HAP without re-signing:

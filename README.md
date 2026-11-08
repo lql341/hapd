@@ -20,6 +20,8 @@ profile/bundle matching and opaque error codes.
   the package so a downloaded HAP can be signed with *your* profile.
 - **Permission fixing** — `--strip-unsupported` drops permissions the profile does
   not grant, which is the cure for install error `9568289`.
+- **Shared packages (HSP)** — pass several packages at once; `hapd` installs the
+  shared bundles first with `hdc install -s`, then the entry HAP.
 - **Automatic certificate-chain repair** — AppGallery Connect ships the chain
   root-first; `hap-sign-tool` wants leaf-first. Handled transparently.
 - **Preflight checks** — `hapd doctor` verifies toolchain, Java, signing material,
@@ -160,8 +162,8 @@ hapd log --filter myapp
 | `hapd udid` | Print the device UDID (needed for AGC). |
 | `hapd info <hap>` | Inspect bundle name, version, API levels, permissions, abilities. |
 | `hapd profiles` | List local profiles: bundle name, expiry, device count. |
-| `hapd sign <hap>` | Sign only. |
-| `hapd install <hap>` | Install (add `--sign` to sign first, `--uninstall` to replace, `--replace` to recover from `9568332`). |
+| `hapd sign <hap...>` | Sign one or more packages. |
+| `hapd install <hap...>` | Install one or more packages (add `--sign` to sign first, `--uninstall` to replace, `--replace` to recover from `9568332`). |
 | `hapd uninstall <bundle>` | Remove a bundle (`--hap` reads the name from a package). |
 | `hapd keygen` | Create a `.p12` + `.csr` for AppGallery Connect. |
 | `hapd renew` | Compare new signing material with the current one before the certificate expires. |
@@ -169,7 +171,7 @@ hapd log --filter myapp
 | `hapd push` / `hapd pull` | Move files to and from the device. |
 | `hapd run <bundle>` | Start an ability (`--hap` reads `mainElement` from the package). |
 | `hapd log [--filter X]` | Stream `hilog`. |
-| `hapd deploy <hap>` | sign → install → run (`--auto-fix` retries on `9568332` / `9568289`). |
+| `hapd deploy <hap...>` | sign → install → run (`--auto-fix` retries on `9568332` / `9568289`). |
 | `hapd update <url\|path>` | Download a build, then deploy. |
 | `hapd explain <code>` | Decode a device error code. |
 
@@ -187,6 +189,32 @@ Module overlay → explicit flag → environment → `./signing/` (newest file w
 | Keystore password | `--password` | `HAPD_P12_PWD` |
 | Key alias | `--alias` | `HAPD_ALIAS` |
 | Material directory | `--signing-dir` | — |
+
+## Apps that use shared packages (HSP)
+
+An app built with a dynamic shared package ships more than one file: an entry HAP
+plus one or more `.hsp`. The HSP must be installed **first** and with `-s`, or the
+entry module fails to resolve its dependency. Hand `hapd` everything at once and
+the ordering is automatic:
+
+```bash
+hapd deploy entry-default-unsigned.hap libshared-default-unsigned.hsp
+```
+
+```
+[dry-run] sign entry-default-unsigned.hap -> entry-default-signed.hap
+[dry-run] sign libshared-default-unsigned.hsp -> libshared-default-signed.hap
+[dry-run] hdc install -r -s libshared-default-signed.hsp     # shared bundle first
+[dry-run] hdc install -r entry-default-signed.hap
+[dry-run] hdc shell aa start -a EntryAbility -b com.example.app -m entry
+```
+
+Every package is signed with the same profile, so all of them must share the
+app's `bundleName` — which is how HarmonyOS packages HSPs anyway. Use `--dry-run`
+to confirm the order before touching a device.
+
+If you only have an `.app` archive, unpack it first (`app_unpacking_tool.jar`
+from `toolchains/lib/`) and pass the resulting HAP/HSP files.
 
 ## Signing a HAP that is not yours
 

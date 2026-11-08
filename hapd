@@ -20,7 +20,7 @@ import time
 import zipfile
 from datetime import datetime
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # --------------------------------------------------------------------------
 # error codes seen while installing/debugging HAPs
@@ -121,11 +121,17 @@ def java_cmd():
 # HAP inspection
 # --------------------------------------------------------------------------
 def read_module_json(path):
-    with zipfile.ZipFile(path) as z:
-        try:
-            raw = z.read("module.json")
-        except KeyError:
-            die(f"{path} has no module.json - is this a HAP/HSP?", code=2)
+    try:
+        with zipfile.ZipFile(path) as z:
+            try:
+                raw = z.read("module.json")
+            except KeyError:
+                die(f"{os.path.basename(path)}: no module.json inside - "
+                    f"is this a HAP/HSP? (.app archives must be unpacked first, "
+                    f"e.g. with app_unpacking_tool.jar)", code=2)
+    except zipfile.BadZipFile:
+        die(f"{os.path.basename(path)}: not a zip archive (corrupt or unfinished download)",
+            code=2)
     return json.loads(raw)
 
 
@@ -154,6 +160,7 @@ def hap_info(path):
         "min_api": app.get("minAPIVersion"),
         "target_api": app.get("targetAPIVersion"),
         "module_name": m.get("name"),
+        "module_type": m.get("type"),
         "main_element": m.get("mainElement"),
         "device_types": m.get("deviceTypes"),
         "permissions": [p.get("name") for p in m.get("requestPermissions", [])],
@@ -310,7 +317,6 @@ def sign_material(args, jar):
     p12 = args.p12 or os.environ.get("HAPD_P12") or _first(signing, "*.p12")
     cer = args.cert or os.environ.get("HAPD_CERT") or _first(signing, "*.cer")
     p7b = args.profile or os.environ.get("HAPD_PROFILE") or _first(signing, "*.p7b")
-    alias = args.alias or args.name
     pwd = args.password or os.environ.get("HAPD_P12_PWD")
     alias = args.alias or os.environ.get("HAPD_ALIAS")
 
@@ -396,7 +402,11 @@ def do_sign(hap, out, args, jar):
                "-appCertFile", chain, "-profileFile", p7b, "-inFile", src, "-outFile", out,
                "-keystoreFile", p12, "-keyPwd", pwd, "-keystorePwd", pwd,
                "-signCode", "0" if args.no_code_sign else "1"]
-        r = run(cmd, dry_run=args.dry_run, check=False)
+        if args.dry_run:
+            return {"out": os.path.abspath(out), "bundle": prov["bundle_name"],
+                    "profile": prov["path"], "dropped": drop, "dry_run": True}
+
+        r = run(cmd, check=False)
         text = (r.stdout or "") + (r.stderr or "")
         if "sign-app success" not in text:
             die("sign-app failed:\n" + text.strip(), code=4)
@@ -405,7 +415,7 @@ def do_sign(hap, out, args, jar):
         vcer = os.path.join(work, "v.cer")
         vp7b = os.path.join(work, "v.p7b")
         r = run([java_cmd(), "-jar", jar, "verify-app", "-inFile", out,
-                 "-outCertChain", vcer, "-outProfile", vp7b], dry_run=args.dry_run, check=False)
+                 "-outCertChain", vcer, "-outProfile", vp7b], check=False)
         vtext = (r.stdout or "") + (r.stderr or "")
         if "verify-app success" not in vtext:
             die("verify-app failed:\n" + vtext.strip(), code=4)
@@ -514,7 +524,8 @@ def cmd_info(args, hdc_path, jar):
     print(f"bundleName  : {i['bundle_name']}")
     print(f"version     : {i['version_name']} ({i['version_code']})")
     print(f"api         : min {i['min_api']} -> target {i['target_api']}")
-    print(f"module      : {i['module_name']} / mainElement {i['main_element']}")
+    print(f"module      : {i['module_name']} / type {i['module_type']} / "
+          f"mainElement {i['main_element']}")
     print(f"deviceTypes : {', '.join(i['device_types'] or [])}")
     print(f"signed      : {i['signed']}")
     if getattr(args, "verify", False):
@@ -557,12 +568,17 @@ def cmd_profiles(args, hdc_path, jar):
 
 
 def cmd_sign(args, hdc_path, jar):
-    res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
+    files = list(args.hap)
+    out_all = []
+    for f in files:
+        out = args.output if (args.output and len(files) == 1) else _default_out(f)
+        res = do_sign(f, out, args, jar)
+        out_all.append(res)
+        if not args.json:
+            print(f"signed: {res['out']}")
+            print(f"bundle: {res['bundle']}")
     if args.json:
-        print(json.dumps(res, indent=2))
-    else:
-        print(f"signed: {res['out']}")
-        print(f"bundle: {res['bundle']}")
+        print(json.dumps(out_all if len(out_all) > 1 else out_all[0], indent=2))
     return 0
 
 
@@ -572,43 +588,78 @@ def _default_out(hap):
     return hap[: -len(".hap")] + "-signed.hap"
 
 
-def _install_once(hdc_path, target, hap, dry_run=False):
-    cmd = [hdc_path] + (["-t", target] if target else []) + ["install", "-r", hap]
+def _install_once(hdc_path, target, hap, dry_run=False, shared=False):
+    flags = ["-r"] + (["-s"] if shared else [])
+    cmd = [hdc_path] + (["-t", target] if target else []) + ["install"] + flags + [hap]
     r = run(cmd, dry_run=dry_run, check=False)
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     return "successfully" in txt, txt
 
 
+def order_for_install(paths):
+    """Split packages into (shared bundles, normal modules).
+
+    HSP must be installed before the HAP that depends on it, and with `-s`.
+    Unknown packages are treated as normal so a broken one still reports its error.
+    """
+    shared, normal = [], []
+    for p in paths:
+        try:
+            kind = hap_info(p).get("module_type")
+        except SystemExit:
+            kind = None
+        (shared if kind == "shared" else normal).append(p)
+    return shared, normal
+
+
 def cmd_install(args, hdc_path, jar):
+    files = list(args.hap)
     if args.sign:
-        res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
-        hap = res["out"]
-    else:
-        hap = args.hap
+        signed = []
+        for f in files:
+            out = args.output if (args.output and len(files) == 1) else _default_out(f)
+            signed.append(do_sign(f, out, args, jar)["out"])
+        files = signed
+
     tgt = pick_target(hdc_path, args.target)
     bundle = None
-    try:
-        bundle = hap_info(hap)["bundle_name"]
-    except SystemExit:
-        pass
+    for f in files:
+        try:
+            bundle = bundle or hap_info(f)["bundle_name"]
+        except SystemExit:
+            pass
 
     if getattr(args, "uninstall", False) and bundle:
-        ok, txt = _uninstall(hdc_path, tgt, bundle, args.dry_run)
+        ok, _ = _uninstall(hdc_path, tgt, bundle, args.dry_run)
         eprint(f"  uninstall {bundle}: {'ok' if ok else 'not installed'}")
 
-    ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
-
-    # same bundle already installed with another signature -> replace it
-    if not ok and bundle and getattr(args, "replace", False) and "9568332" in txt:
-        eprint(f"  9568332: signature differs, replacing installed {bundle}")
-        _uninstall(hdc_path, tgt, bundle, args.dry_run)
-        ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
+    results = []
+    ok_all = True
+    shared, normal = order_for_install(files)
+    for pkg, is_shared in [(p, True) for p in shared] + [(p, False) for p in normal]:
+        label = "shared" if is_shared else "module"
+        ok, txt = _install_once(hdc_path, tgt, pkg, args.dry_run, shared=is_shared)
+        if (not ok and getattr(args, "replace", False) and "9568332" in txt
+                and bundle and not is_shared):
+            eprint(f"  9568332: signature differs, replacing installed {bundle}")
+            _uninstall(hdc_path, tgt, bundle, args.dry_run)
+            ok, txt = _install_once(hdc_path, tgt, pkg, args.dry_run, shared=is_shared)
+        if not ok:
+            ok_all = False
+            hint = _hint_for(txt)
+            if hint:
+                eprint("hint: " + hint)
+        results.append({"file": os.path.basename(pkg), "kind": label, "ok": ok, "output": txt})
+        if not args.json:
+            print(f"[{label}] {os.path.basename(pkg)}: {'ok' if ok else 'FAILED'}")
+            if not ok:
+                print("  " + txt.replace("\n", "\n  "))
+        if not ok:
+            break
 
     if args.json:
-        print(json.dumps({"ok": ok, "bundle": bundle, "output": txt}, indent=2))
-    else:
-        print(txt)
-    return 0 if ok else 5
+        print(json.dumps({"ok": ok_all, "bundle": bundle, "installs": results}, indent=2))
+    return 0 if ok_all else 5
 
 
 def _uninstall(hdc_path, target, bundle, dry_run=False):
@@ -842,32 +893,71 @@ def _preflight(args, hdc_path, jar, bundle):
 
 
 def cmd_deploy(args, hdc_path, jar):
-    res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
-    hap, bundle = res["out"], res["bundle"]
-    if args.no_install:
-        print(hap)
+    files = list(args.hap)
+
+    if args.dry_run:
+        shared, normal = order_for_install(files)
+        for f in files:
+            print(f"[dry-run] sign {f} -> {_default_out(f)}")
+        for pkg in shared:
+            print(f"[dry-run] {hdc_path} install -r -s {pkg}")
+        for pkg in normal:
+            print(f"[dry-run] {hdc_path} install -r {pkg}")
+        if not args.no_run:
+            try:
+                bundle = hap_info(files[0])["bundle_name"]
+            except SystemExit:
+                bundle = "<bundle>"
+            print(f"[dry-run] {hdc_path} shell aa start -a EntryAbility -b {bundle} -m entry")
         return 0
+
+    signed = []
+    for f in files:
+        out = args.output if (args.output and len(files) == 1) else _default_out(f)
+        signed.append(do_sign(f, out, args, jar))
+
+    entry = next((r for r in signed if _module_type(r["out"]) != "shared"), signed[0])
+    bundle = entry["bundle"]
+    if args.no_install:
+        for r in signed:
+            print(r["out"])
+        return 0
+
     _preflight(args, hdc_path, jar, bundle)
     tgt = pick_target(hdc_path, args.target)
-    ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
 
-    for attempt in range(1, args.max_fix + 1 if args.auto_fix else 1):
-        if ok:
+    shared, normal = order_for_install([r["out"] for r in signed])
+    ok_all, txt = True, ""
+    for pkg, is_shared in [(p, True) for p in shared] + [(p, False) for p in normal]:
+        ok, out = _install_once(hdc_path, tgt, pkg, args.dry_run, shared=is_shared)
+        if not ok:
+            ok_all, txt = False, out
             break
-        if "9568332" in txt:                        # signature changed
-            eprint(f"  [auto-fix {attempt}] 9568332: uninstalling {bundle}")
-            _uninstall(hdc_path, tgt, bundle, args.dry_run)
-            ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
-        elif "9568289" in txt and not args.strip_unsupported:   # ACL denied
-            eprint(f"  [auto-fix {attempt}] 9568289: stripping unsupported permissions")
-            args.strip_unsupported = True
-            hp = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
-            hap = hp["out"]
-            ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
-        else:
-            break
+    if not ok_all and args.auto_fix:
+        for attempt in range(1, args.max_fix + 1):
+            if "9568332" in txt:
+                eprint(f"  [auto-fix {attempt}] 9568332: uninstalling {bundle}")
+                _uninstall(hdc_path, tgt, bundle, args.dry_run)
+            elif "9568289" in txt and not args.strip_unsupported:
+                eprint(f"  [auto-fix {attempt}] 9568289: stripping unsupported permissions")
+                args.strip_unsupported = True
+                signed = []
+                for f in files:
+                    out = args.output if (args.output and len(files) == 1) else _default_out(f)
+                    signed.append(do_sign(f, out, args, jar))
+                shared, normal = order_for_install([r["out"] for r in signed])
+            else:
+                break
+            ok_all, txt = True, ""
+            for pkg, is_shared in [(p, True) for p in shared] + [(p, False) for p in normal]:
+                ok, out = _install_once(hdc_path, tgt, pkg, args.dry_run, shared=is_shared)
+                if not ok:
+                    ok_all, txt = False, out
+                    break
+            if ok_all:
+                break
 
-    if not ok:
+    if not ok_all:
         if args.json:
             print(json.dumps({"ok": False, "bundle": bundle, "output": txt}, indent=2))
         else:
@@ -877,12 +967,21 @@ def cmd_deploy(args, hdc_path, jar):
             eprint("hint: " + hint)
         return 5
     if not args.json:
-        print(txt)
+        for r in signed:
+            print(f"installed: {os.path.basename(r['out'])}")
+
     if args.no_run:
         return 0
     return cmd_run(argparse.Namespace(bundle=bundle, ability=None, module="entry",
-                                      target=args.target, hap=hap, json=args.json,
-                                      dry_run=args.dry_run), hdc_path, jar)
+                                      target=args.target, hap=entry["out"],
+                                      json=args.json, dry_run=args.dry_run), hdc_path, jar)
+
+
+def _module_type(path):
+    try:
+        return hap_info(path).get("module_type")
+    except SystemExit:
+        return None
 
 
 def cmd_update(args, hdc_path, jar):
@@ -898,7 +997,7 @@ def cmd_update(args, hdc_path, jar):
             run(["curl", "-fL", "--progress-bar", "-o", dest + ".part", src], capture=False)
             os.replace(dest + ".part", dest)
         src = dest
-    return cmd_deploy(argparse.Namespace(hap=src, output=args.output, p12=args.p12,
+    return cmd_deploy(argparse.Namespace(hap=[src], output=args.output, p12=args.p12,
                                          cert=args.cert, profile=args.profile,
                                          password=args.password, alias=args.alias,
                                          rename_bundle=args.rename_bundle,
@@ -982,14 +1081,14 @@ def build_parser():
     sp.add_argument("--signing-dir")
     sp.set_defaults(func=cmd_profiles)
 
-    sp = sub.add_parser("sign", help="sign a HAP")
-    sp.add_argument("hap")
+    sp = sub.add_parser("sign", help="sign one or more HAP/HSP packages")
+    sp.add_argument("hap", nargs="+")
     sp.add_argument("-o", "--output")
     sign_opts(sp)
     sp.set_defaults(func=cmd_sign)
 
-    sp = sub.add_parser("install", help="install a HAP (optionally sign first)")
-    sp.add_argument("hap")
+    sp = sub.add_parser("install", help="install HAP/HSP packages (HSP first, with -s)")
+    sp.add_argument("hap", nargs="+")
     sp.add_argument("--sign", action="store_true", help="sign before installing")
     sp.add_argument("--uninstall", action="store_true",
                     help="uninstall the same bundle name first")
@@ -1054,8 +1153,8 @@ def build_parser():
     sp.add_argument("--target")
     sp.set_defaults(func=cmd_log)
 
-    sp = sub.add_parser("deploy", help="sign + install + run")
-    sp.add_argument("hap")
+    sp = sub.add_parser("deploy", help="sign + install + run (accepts entry.hap lib.hsp ...)")
+    sp.add_argument("hap", nargs="+")
     sp.add_argument("-o", "--output")
     sp.add_argument("--target")
     sp.add_argument("--no-install", action="store_true")

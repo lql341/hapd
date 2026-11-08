@@ -20,6 +20,8 @@ Command Line Tools（`hdc` + `hap-sign-tool`）封装成一条非交互命令。
   让下载来的包可以用**你的** Profile 签名。
 - **权限修复** —— `--strip-unsupported` 自动剥掉 Profile 没授权的权限，
   这是 `9568289` 的对症药。
+- **共享包（HSP）联动** —— 一次传多个包，`hapd` 会先用 `hdc install -s`
+  装共享包，再装 entry HAP。
 - **自动修正证书链顺序** —— AGC 下载的 `.cer` 是「根→中间→实体」，
   `hap-sign-tool` 要「实体→中间→根」，自动处理。
 - **体检** —— `hapd doctor` 检查工具链、Java、签名材料、Profile 有效期，
@@ -155,8 +157,8 @@ hapd log --filter myapp
 | `hapd udid` | 打印设备 UDID（AGC 注册用） |
 | `hapd info <hap>` | 查看包名、版本、API、权限、Ability |
 | `hapd profiles` | 列出本地 Profile：包名、有效期、设备数 |
-| `hapd sign <hap>` | 只签名 |
-| `hapd install <hap>` | 安装（`--sign` 先签名，`--uninstall` 先卸载，`--replace` 从 `9568332` 自动恢复） |
+| `hapd sign <hap...>` | 给一个或多个包签名 |
+| `hapd install <hap...>` | 安装一个或多个包（`--sign` 先签名，`--uninstall` 先卸载，`--replace` 从 `9568332` 自动恢复） |
 | `hapd uninstall <bundle>` | 卸载（`--hap` 从包里读包名） |
 | `hapd keygen` | 生成 AGC 要用的 `.p12` + `.csr` |
 | `hapd renew` | 证书到期前，比对新的签名材料与当前的是否同一身份 |
@@ -164,7 +166,7 @@ hapd log --filter myapp
 | `hapd push` / `hapd pull` | 往设备传文件 / 从设备取文件 |
 | `hapd run <bundle>` | 启动 Ability（`--hap` 可从包里读 `mainElement`） |
 | `hapd log [--filter X]` | 跟 hilog |
-| `hapd deploy <hap>` | 签名 → 安装 → 启动（`--auto-fix` 遇 `9568332`/`9568289` 自动重试） |
+| `hapd deploy <hap...>` | 签名 → 安装 → 启动（`--auto-fix` 遇 `9568332`/`9568289` 自动重试） |
 | `hapd update <url\|路径>` | 下载新构建后直接部署 |
 | `hapd explain <code>` | 解释设备错误码 |
 
@@ -182,6 +184,30 @@ module 覆盖层 → 显式参数 → 环境变量 → `./signing/` 下最新文
 | 密钥库密码 | `--password` | `HAPD_P12_PWD` |
 | 密钥别名 | `--alias` | `HAPD_ALIAS` |
 | 材料目录 | `--signing-dir` | — |
+
+## 带共享包（HSP）的应用
+
+用了动态共享包的应用不止一个文件：一个 entry HAP 加一个或多个 `.hsp`。
+HSP **必须先装**，而且要带 `-s`，否则 entry 模块解析不到依赖。把文件一次交给
+`hapd`，顺序它自己排：
+
+```bash
+hapd deploy entry-default-unsigned.hap libshared-default-unsigned.hsp
+```
+
+```
+[dry-run] sign entry-default-unsigned.hap -> entry-default-signed.hap
+[dry-run] sign libshared-default-unsigned.hsp -> libshared-default-signed.hap
+[dry-run] hdc install -r -s libshared-default-signed.hsp     # 共享包先装
+[dry-run] hdc install -r entry-default-signed.hap
+[dry-run] hdc shell aa start -a EntryAbility -b com.example.app -m entry
+```
+
+所有包共用同一个 Profile，所以它们的 `bundleName` 必须一致——鸿蒙的 HSP 本来
+就是这么打的。动设备之前先 `--dry-run` 看一眼顺序。
+
+手上只有 `.app` 归档的话，先用 `toolchains/lib/app_unpacking_tool.jar` 拆出
+HAP/HSP 再传进来。
 
 ## 签别人的包
 

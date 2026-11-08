@@ -30,7 +30,8 @@ def load_hapd():
 hapd = load_hapd()
 
 
-def make_hap(path, bundle="com.example.app", permissions=("ohos.permission.INTERNET",)):
+def make_hap(path, bundle="com.example.app", permissions=("ohos.permission.INTERNET",),
+             kind="entry"):
     module = {
         "app": {
             "bundleName": bundle,
@@ -41,6 +42,7 @@ def make_hap(path, bundle="com.example.app", permissions=("ohos.permission.INTER
         },
         "module": {
             "name": "entry",
+            "type": kind,
             "mainElement": "EntryAbility",
             "deviceTypes": ["phone"],
             "requestPermissions": [{"name": p} for p in permissions],
@@ -201,6 +203,76 @@ class TestChainOrder(TempDir):
         self.assertNotEqual(hapd.pubkey_fp(pem_a), hapd.pubkey_fp(pem_b))
         # same certificate -> same fingerprint
         self.assertEqual(hapd.pubkey_fp(pem_a), hapd.pubkey_fp(pem_a))
+
+
+class TestModuleType(TempDir):
+    def test_entry_and_shared_are_distinguished(self):
+        hap = make_hap(os.path.join(self.tmp, "a.hap"), kind="entry")
+        hsp = make_hap(os.path.join(self.tmp, "b.hsp"), kind="shared")
+        self.assertEqual(hapd.hap_info(hap)["module_type"], "entry")
+        self.assertEqual(hapd.hap_info(hsp)["module_type"], "shared")
+
+    def test_order_puts_shared_first(self):
+        hap = make_hap(os.path.join(self.tmp, "entry.hap"), kind="entry")
+        hsp1 = make_hap(os.path.join(self.tmp, "lib1.hsp"), kind="shared")
+        hsp2 = make_hap(os.path.join(self.tmp, "lib2.hsp"), kind="shared")
+        shared, normal = hapd.order_for_install([hap, hsp1, hsp2])
+        self.assertEqual(shared, [hsp1, hsp2])
+        self.assertEqual(normal, [hap])
+
+    def test_unknown_packages_are_treated_as_normal(self):
+        good = make_hap(os.path.join(self.tmp, "ok.hap"))
+        junk = os.path.join(self.tmp, "junk.hap")
+        with open(junk, "wb") as f:
+            f.write(b"not a zip")
+        shared, normal = hapd.order_for_install([junk, good])
+        self.assertEqual(shared, [])
+        self.assertIn(good, normal)
+
+
+class TestCliOffline(TempDir):
+    """End-to-end CLI behaviour with a stub toolchain, no SDK or device."""
+
+    def setUp(self):
+        super().setUp()
+        clt = os.path.join(self.tmp, "clt")
+        tc = os.path.join(clt, "sdk", "default", "openharmony", "toolchains")
+        os.makedirs(os.path.join(tc, "lib"))
+        for f in (os.path.join(tc, "hdc"), os.path.join(tc, "lib", "hap-sign-tool.jar")):
+            open(f, "w").close()
+        self.env = dict(os.environ, HAPD_TOOLCHAIN=clt, HAPD_P12="", HAPD_CERT="",
+                        HAPD_PROFILE="", HAPD_P12_PWD="")
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "hapd")] + list(args),
+                              capture_output=True, text=True, env=self.env)
+
+    def test_dry_run_deploy_orders_hsp_before_hap(self):
+        hap = make_hap(os.path.join(self.tmp, "entry-unsigned.hap"), kind="entry")
+        hsp = make_hap(os.path.join(self.tmp, "lib-unsigned.hsp"), kind="shared")
+        r = self._run("--dry-run", "deploy", hap, hsp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.strip().splitlines()
+        installs = [ln for ln in lines if "install -r" in ln]
+        self.assertEqual(len(installs), 2)
+        self.assertIn("-r -s", installs[0])          # shared bundle first, with -s
+        self.assertIn(".hsp", installs[0])
+        self.assertNotIn("-s", installs[1])
+
+    def test_dry_run_sign_does_not_need_material(self):
+        hap = make_hap(os.path.join(self.tmp, "a-unsigned.hap"))
+        r = self._run("--dry-run", "sign", hap)
+        # no signing material configured -> must fail cleanly, not traceback
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn(r.returncode, (0, 3))
+
+    def test_info_json_is_machine_readable(self):
+        hap = make_hap(os.path.join(self.tmp, "a.hap"))
+        r = self._run("--json", "info", hap)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.loads(r.stdout)
+        self.assertEqual(doc["bundle_name"], "com.example.app")
+        self.assertEqual(doc["module_type"], "entry")
 
 
 class TestErrorTable(unittest.TestCase):
