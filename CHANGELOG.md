@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.4 - 2026-11-08
+
+- **`--rename-bundle` is refused when the package's bytecode embeds its bundle
+  name.** ArkTS compiled for API 12+ stores module records as
+  `@bundle:<bundleName>/<module>/...` inside `ets/*.abc`. Rewriting `module.json`
+  left those records stale, so the app installed and then died at launch:
+
+  ```
+  ArkCompiler: Cannot execute module buffer file .../entry/ets/entryability/EntryAbility.abc
+  AppKit: Error type: ReferenceError
+  AppKit: Cannot find module 'ets/entryability/EntryAbility', which is application EntryPoint
+  AppKit: ... exit with code: 254
+  ```
+
+  `embedded_bundle_refs()` / `rename_blockers()` scan the `.abc` payloads; `sign`
+  now exits 2 with the two real options (a profile for the original bundle name,
+  or a rebuild). README/README_CN/AGENTS corrected — the previous text implied a
+  zip-level rename works for any HAP.
+- 41 tests.
+
 ## 0.3.3 - 2026-11-08
 
 - **`--strip-unsupported` no longer strips normal-level permissions.** It compared

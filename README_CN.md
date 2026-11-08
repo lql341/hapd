@@ -216,20 +216,39 @@ HAP/HSP 再传进来。
 
 ## 签别人的包
 
-下载来的 HAP 通常是别人的签名，或者压根没签。`hapd` 可以重新定向：
+下载来的 HAP 通常签的是别人的 Profile，或者压根没签。本地能调的两件事：
 
 ```bash
-# Profile 里是 com.example.mine，包里是 com.someone.else
-hapd sign downloaded.hap -o mine.hap --rename-bundle com.example.mine
-
-# 安装报 9568289 → 把 Profile 不允许的权限全剥掉
-hapd sign downloaded.hap -o mine.hap --rename-bundle com.example.mine --strip-unsupported
+# Profile 授予的权限比包申请的少（9568289）
+hapd sign downloaded.hap -o mine.hap --profile my.p7b --strip-unsupported
 ```
 
-`--rename-bundle` 会改写包内 `module.json`（以及 `pack.info`），再重新签名。
-如果指定的名字和 Profile 的包名不一致，它会直接拒绝——否则设备必然拒装。
+`--strip-unsupported` 只剥 Profile 没授权的 `system_basic` / `system_core` 权限。
+普通权限（`INTERNET`、`CAMERA` 等）不动 —— 剥掉它们的后果是**装得上但用不了**。
 
-> 请遵守被重签应用的许可协议。这个功能是为「装自己的构建」和「授权允许分发的应用」准备的。
+**改包名只对"字节码里没硬编码包名"的包有效。** API 12+ 编译出的 ArkTS 会在
+`ets/*.abc` 里存 `@bundle:<包名>/<模块>/…` 形式的模块记录，只改 `module.json`
+会导致运行时找不到入口：
+
+```
+Cannot find module 'ets/entryability/EntryAbility', which is application Entry Point
+```
+
+`hapd` 会检测并直接拒绝：
+
+```
+hapd: cannot rename the bundle of this package:
+    compiled bytecode references ['com.follow.clash'] (normalized OHM URLs);
+    renaming module.json cannot change that
+```
+
+这种情况只有两条路：
+
+1. **去 AGC 申请用原包名的 Profile**（不需要改名）—— 最干净，优先试这个
+2. **改 `AppScope/app.json5` 里的 bundleName 重新构建**，然后签新构建出来的包
+   （它的字节码里已经带着新包名了）
+
+> 请遵守被重签应用的许可协议。
 
 ## 给 agent 用
 

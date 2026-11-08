@@ -223,23 +223,38 @@ from `toolchains/lib/`) and pass the resulting HAP/HSP files.
 
 ## Signing a HAP that is not yours
 
-Downloaded HAPs are usually signed for someone else's profile, or unsigned.
-`hapd` can re-target them:
+A downloaded HAP is signed for someone else's profile, or not signed at all.
+Two things can be adjusted locally:
 
 ```bash
-# profile says com.example.mine, HAP says com.someone.else
-hapd sign downloaded.hap -o mine.hap --rename-bundle com.example.mine
-
-# install fails with 9568289 → drop whatever the profile does not allow
-hapd sign downloaded.hap -o mine.hap --rename-bundle com.example.mine --strip-unsupported
+# the profile grants fewer permissions than the HAP asks for (9568289)
+hapd sign downloaded.hap -o mine.hap --profile my.p7b --strip-unsupported
 ```
 
-`--rename-bundle` rewrites `module.json` (and `pack.info`) inside the ZIP, then
-re-signs. It refuses to target a name that differs from the profile's bundle name,
-because the device would reject the result anyway.
+`--strip-unsupported` drops only `system_basic` / `system_core` permissions your
+profile does not grant. Normal-level permissions (`INTERNET`, `CAMERA`, …) are
+left alone — removing them yields a package that installs and then cannot work.
 
-> Respect the licence of the app you are re-signing. This feature exists for
-> installing your own builds and for apps that permit it.
+**Changing the bundle name only works for packages whose bytecode does not embed
+it.** ArkTS compiled for API 12+ stores module records as
+`@bundle:<bundleName>/<module>/…` inside `ets/*.abc`, so rewriting `module.json`
+makes the runtime fail with *Cannot find module … which is application Entry
+Point*. `hapd` detects this and refuses:
+
+```
+hapd: cannot rename the bundle of this package:
+    compiled bytecode references ['com.follow.clash'] (normalized OHM URLs);
+    renaming module.json cannot change that
+```
+
+Options in that case:
+
+1. **Ask AGC for a profile with the original bundle name** — no rename needed.
+   This is the clean path and what you should try first.
+2. **Rebuild the app** with your bundle name in `AppScope/app.json5`, then sign
+   the freshly built HAP (its bytecode already carries the new name).
+
+> Respect the licence of the app you are re-signing.
 
 ## Using it from an agent
 

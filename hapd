@@ -20,7 +20,7 @@ import time
 import zipfile
 from datetime import datetime
 
-VERSION = "0.3.3"   # keep in sync with ./VERSION and CHANGELOG.md
+VERSION = "0.3.4"   # keep in sync with ./VERSION and CHANGELOG.md
 
 # --------------------------------------------------------------------------
 # error codes seen while installing/debugging HAPs
@@ -183,6 +183,34 @@ def hap_info(path):
         "extension_abilities": [a.get("name") for a in m.get("extensionAbilities", [])],
         "signed": detect_signature(path),
     }
+
+
+def embedded_bundle_refs(hap_path):
+    """Bundle names hard-coded inside compiled ArkTS bytecode (normalized OHM URLs).
+
+    ArkTS for API 12+ stores module records as `@bundle:<bundleName>/<module>/...`
+    inside ets/*.abc. Rewriting module.json alone leaves those records pointing at
+    the old name, and the runtime then fails with
+    "Cannot find module '<module>/ets/<ability>/<Name>', which is application EntryPoint".
+    """
+    refs = set()
+    with zipfile.ZipFile(hap_path) as z:
+        for name in z.namelist():
+            if not name.endswith(".abc"):
+                continue
+            for hit in re.findall(rb"@bundle:([A-Za-z0-9_.]+)", z.read(name)):
+                refs.add(hit.decode("ascii", "ignore"))
+    return refs
+
+
+def rename_blockers(hap_path, new_bundle):
+    """Why a zip-level bundle rename cannot work for this package ([] if it can)."""
+    refs = embedded_bundle_refs(hap_path)
+    stale = sorted(r for r in refs if r and r != new_bundle)
+    if not stale:
+        return []
+    return [f"compiled bytecode references {stale} (normalized OHM URLs); "
+            f"renaming module.json cannot change that"]
 
 
 def rewrite_hap(src, dst, bundle_name=None, drop_permissions=(), add_permissions=()):
@@ -417,6 +445,15 @@ def do_sign(hap, out, args, jar):
         if args.rename_bundle and args.rename_bundle != prov["bundle_name"]:
             die(f"--rename-bundle must equal the profile's bundle name "
                 f"({prov['bundle_name']}), otherwise the device rejects the install.", code=2)
+        if args.rename_bundle and info["bundle_name"] != args.rename_bundle:
+            why = rename_blockers(src, args.rename_bundle)
+            if why:
+                die("cannot rename the bundle of this package:\n    " + "\n    ".join(why) +
+                    "\n  Options:\n"
+                    "    1. ask AGC for a profile whose bundle name is "
+                    f"{info['bundle_name']} (no rename needed)\n"
+                    "    2. rebuild the app with the new bundleName in AppScope/app.json5",
+                    code=2)
         if info["bundle_name"] != prov["bundle_name"]:
             if not args.rename_bundle:
                 die(f"bundle name mismatch:\n  hap     : {info['bundle_name']}\n"

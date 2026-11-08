@@ -152,11 +152,14 @@ HAPD_P12_PWD=... hapd keygen --name my-key -o signing
 Re-target a HAP that was signed for someone else:
 
 ```bash
-hapd sign ./thirdparty.hap -o ./mine.hap --rename-bundle com.example.mine --strip-unsupported
+hapd sign ./thirdparty.hap -o ./mine.hap --profile mine.p7b --strip-unsupported
 ```
 
-Wait: `--rename-bundle` **must** equal the profile's bundle name or `hapd` exits 2.
-Read it from `hapd --json profiles`.
+`--rename-bundle` **must** equal the profile's bundle name or `hapd` exits 2, and it
+**only works when the package's bytecode does not embed its bundle name**. ArkTS for
+API 12+ writes `@bundle:<bundleName>/...` records into `ets/*.abc`; for such a
+package `hapd` refuses the rename (exit 2) and the only options are a profile with
+the original bundle name, or a rebuild. Do not try to patch the bytecode.
 
 Launch and observe:
 

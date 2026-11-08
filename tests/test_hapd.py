@@ -291,6 +291,36 @@ class TestCliOffline(TempDir):
         self.assertEqual(doc["module_type"], "entry")
 
 
+class TestBundleRenameSafety(TempDir):
+    """A zip-level rename must be refused when bytecode embeds the old bundle name."""
+
+    def _hap_with_abc(self, bundle="com.follow.clash", refs=None):
+        p = make_hap(os.path.join(self.tmp, "app.hap"), bundle=bundle)
+        refs = refs if refs is not None else [bundle]
+        blob = b"".join(b"@bundle:" + r.encode() + b"/entry/ets/x\x00" for r in refs)
+        with zipfile.ZipFile(p, "a") as z:
+            z.writestr("ets/modules.abc", blob)
+        return p
+
+    def test_detects_embedded_bundle(self):
+        self.assertEqual(hapd.embedded_bundle_refs(self._hap_with_abc()),
+                         {"com.follow.clash"})
+
+    def test_rename_is_blocked(self):
+        p = self._hap_with_abc()
+        why = hapd.rename_blockers(p, "com.other.name")
+        self.assertTrue(why)
+        self.assertIn("com.follow.clash", why[0])
+
+    def test_rename_allowed_when_names_agree(self):
+        p = self._hap_with_abc()
+        self.assertEqual(hapd.rename_blockers(p, "com.follow.clash"), [])
+
+    def test_plain_hap_without_bytecode_can_be_renamed(self):
+        p = make_hap(os.path.join(self.tmp, "plain.hap"))
+        self.assertEqual(hapd.rename_blockers(p, "com.anything.else"), [])
+
+
 class TestPermissionStripping(unittest.TestCase):
     DEFS = {
         "ohos.permission.INTERNET": "normal",
