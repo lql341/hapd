@@ -129,7 +129,20 @@ def read_module_json(path):
     return json.loads(raw)
 
 
+def detect_signature(path):
+    """A signed HAP carries a signing block at the end of the file: a base64
+    certificate chain plus the profile. `META-INF` is an APK-ism and never
+    appears in HAPs, so look for the PEM trailer instead."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        f.seek(max(0, size - 262144))
+        tail = f.read()
+    return b"BEGIN CERTIFICATE" in tail
+
+
 def hap_info(path):
+    if not os.path.isfile(path):
+        die(f"no such file: {path}", code=2)
     app = read_module_json(path)["app"]
     m = read_module_json(path)["module"]
     return {
@@ -146,7 +159,7 @@ def hap_info(path):
         "permissions": [p.get("name") for p in m.get("requestPermissions", [])],
         "abilities": [a.get("name") for a in m.get("abilities", [])],
         "extension_abilities": [a.get("name") for a in m.get("extensionAbilities", [])],
-        "signed": "META-INF" in zipfile.ZipFile(path).namelist(),
+        "signed": detect_signature(path),
     }
 
 
@@ -297,6 +310,7 @@ def sign_material(args, jar):
     p12 = args.p12 or os.environ.get("HAPD_P12") or _first(signing, "*.p12")
     cer = args.cert or os.environ.get("HAPD_CERT") or _first(signing, "*.cer")
     p7b = args.profile or os.environ.get("HAPD_PROFILE") or _first(signing, "*.p7b")
+    alias = args.alias or args.name
     pwd = args.password or os.environ.get("HAPD_P12_PWD")
     alias = args.alias or os.environ.get("HAPD_ALIAS")
 
@@ -552,14 +566,51 @@ def cmd_install(args, hdc_path, jar):
     else:
         hap = args.hap
     tgt = pick_target(hdc_path, args.target)
+    bundle = None
+    try:
+        bundle = hap_info(hap)["bundle_name"]
+    except SystemExit:
+        pass
+
+    if getattr(args, "uninstall", False) and bundle:
+        ok, txt = _uninstall(hdc_path, tgt, bundle, args.dry_run)
+        eprint(f"  uninstall {bundle}: {'ok' if ok else 'not installed'}")
+
     cmd = [hdc_path] + (["-t", tgt] if tgt else []) + ["install", "-r", hap]
     r = run(cmd, dry_run=args.dry_run, check=False)
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     ok = "successfully" in txt
+
+    # same bundle already installed with another signature -> replace it
+    if not ok and bundle and getattr(args, "replace", False) and "9568332" in txt:
+        eprint(f"  9568332: signature differs, replacing installed {bundle}")
+        _uninstall(hdc_path, tgt, bundle, args.dry_run)
+        r = run(cmd, dry_run=args.dry_run, check=False)
+        txt = ((r.stdout or "") + (r.stderr or "")).strip()
+        ok = "successfully" in txt
+
     if args.json:
-        print(json.dumps({"ok": ok, "output": txt}, indent=2))
+        print(json.dumps({"ok": ok, "bundle": bundle, "output": txt}, indent=2))
     else:
         print(txt)
+    return 0 if ok else 5
+
+
+def _uninstall(hdc_path, target, bundle, dry_run=False):
+    cmd = [hdc_path] + (["-t", target] if target else []) + ["uninstall", bundle]
+    r = run(cmd, dry_run=dry_run, check=False)
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    return "success" in txt.lower(), txt
+
+
+def cmd_uninstall(args, hdc_path, jar):
+    tgt = pick_target(hdc_path, args.target)
+    bundle = args.bundle or hap_info(args.hap)["bundle_name"]
+    ok, txt = _uninstall(hdc_path, tgt, bundle, args.dry_run)
+    if args.json:
+        print(json.dumps({"ok": ok, "bundle": bundle, "output": txt}, indent=2))
+    else:
+        print(txt or ("uninstalled " + bundle if ok else "not installed: " + bundle))
     return 0 if ok else 5
 
 
@@ -593,14 +644,70 @@ def cmd_log(args, hdc_path, jar):
     os.execvp(cmd[0], cmd)
 
 
+def cmd_keygen(args, hdc_path, jar):
+    """Generate a keystore + certificate signing request the AGC way."""
+    os.makedirs(args.out, exist_ok=True)
+    p12 = os.path.join(args.out, args.name + ".p12")
+    csr = os.path.join(args.out, args.name + ".csr")
+    alias = args.alias or args.name
+    pwd = args.password or os.environ.get("HAPD_P12_PWD")
+    if not pwd:
+        die("missing password: pass --password or set HAPD_P12_PWD", code=2)
+    if os.path.exists(p12) and not args.force:
+        die(f"{p12} already exists (use --force to overwrite)", code=2)
+    dname = args.dname or f"C=CN,O={alias},OU=HarmonyOS,CN={alias}"
+
+    run(["keytool", "-genkeypair", "-alias", alias, "-keyalg", "EC",
+         "-groupname", "secp256r1", "-sigalg", "SHA256withECDSA", "-dname", dname,
+         "-keystore", p12, "-storetype", "pkcs12", "-validity", str(args.days),
+         "-storepass", pwd, "-keypass", pwd], dry_run=args.dry_run)
+    run(["keytool", "-certreq", "-alias", alias, "-sigalg", "SHA256withECDSA",
+         "-keystore", p12, "-storetype", "pkcs12", "-file", csr,
+         "-storepass", pwd], dry_run=args.dry_run)
+
+    res = {"p12": os.path.abspath(p12), "csr": os.path.abspath(csr), "alias": alias}
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print(f"keystore : {res['p12']}")
+        print(f"csr      : {res['csr']}")
+        print(f"alias    : {alias}")
+        print()
+        print("Next: upload the CSR to AppGallery Connect to get a debug certificate,")
+        print("then create a debug profile for your bundle name and device UDID.")
+    return 0
+
+
+def _preflight(args, hdc_path, jar, bundle):
+    """Warn (do not fail) when the device cannot possibly accept this bundle."""
+    tgt = pick_target(hdc_path, args.target)
+    if not tgt:
+        return
+    udid = device_udid(hdc_path, tgt)
+    if not udid:
+        return
+    try:
+        p12, cer, p7b, alias, pwd = sign_material(args, jar)
+        prov = profile_info(p7b, jar)
+    except SystemExit:
+        return
+    if prov["device_ids"] and udid not in prov["device_ids"]:
+        eprint(f"warning: device {udid[:16]}... is not in the profile's device list; "
+               f"the install will fail (9568266)")
+    if (prov["days_left"] or 1) <= 0:
+        eprint(f"warning: profile expired on {prov['expires']}")
+
+
 def cmd_deploy(args, hdc_path, jar):
     res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
     hap, bundle = res["out"], res["bundle"]
     if args.no_install:
         print(hap)
         return 0
+    _preflight(args, hdc_path, jar, bundle)
     rc = cmd_install(argparse.Namespace(hap=hap, sign=False, output=None, target=args.target,
-                                        json=args.json, dry_run=args.dry_run), hdc_path, jar)
+                                        json=args.json, dry_run=args.dry_run,
+                                        uninstall=False, replace=args.replace), hdc_path, jar)
     if rc != 0:
         return rc
     if args.no_run:
@@ -631,7 +738,7 @@ def cmd_update(args, hdc_path, jar):
                                          strip_unsupported=args.strip_unsupported,
                                          no_code_sign=False, signing_dir=args.signing_dir,
                                          no_install=args.no_install, no_run=args.no_run,
-                                         target=args.target, json=args.json,
+                                         replace=args.replace, target=args.target, json=args.json,
                                          dry_run=args.dry_run), hdc_path, jar)
 
 
@@ -714,10 +821,30 @@ def build_parser():
     sp = sub.add_parser("install", help="install a HAP (optionally sign first)")
     sp.add_argument("hap")
     sp.add_argument("--sign", action="store_true", help="sign before installing")
+    sp.add_argument("--uninstall", action="store_true",
+                    help="uninstall the same bundle name first")
+    sp.add_argument("--replace", action="store_true",
+                    help="on 9568332 (signature differs) uninstall and retry once")
     sp.add_argument("-o", "--output")
     sp.add_argument("--target")
     sign_opts(sp)
     sp.set_defaults(func=cmd_install)
+
+    sp = sub.add_parser("uninstall", help="uninstall a bundle")
+    sp.add_argument("bundle", nargs="?")
+    sp.add_argument("--hap", help="read the bundle name from this HAP instead")
+    sp.add_argument("--target")
+    sp.set_defaults(func=cmd_uninstall)
+
+    sp = sub.add_parser("keygen", help="create a keystore (.p12) and CSR for AGC")
+    sp.add_argument("--name", default="hapd-key", help="file stem (default: hapd-key)")
+    sp.add_argument("--alias", help="key alias (default: same as --name)")
+    sp.add_argument("-o", "--out", default="signing", help="output directory")
+    sp.add_argument("--password")
+    sp.add_argument("--dname")
+    sp.add_argument("--days", type=int, default=9125)
+    sp.add_argument("--force", action="store_true")
+    sp.set_defaults(func=cmd_keygen)
 
     sp = sub.add_parser("run", help="start an ability")
     sp.add_argument("bundle")
@@ -738,6 +865,8 @@ def build_parser():
     sp.add_argument("--target")
     sp.add_argument("--no-install", action="store_true")
     sp.add_argument("--no-run", action="store_true")
+    sp.add_argument("--replace", action="store_true",
+                    help="on 9568332 uninstall the installed build and retry")
     sign_opts(sp)
     sp.set_defaults(func=cmd_deploy)
 

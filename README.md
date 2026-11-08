@@ -59,14 +59,12 @@ A HAP must be signed with a certificate the device trusts. Community/OpenHarmony
 certificates are **rejected by commercial HarmonyOS devices** (`9568257`), so you
 need AppGallery Connect material:
 
-1. `keytool -genkeypair -alias my-key -keyalg EC -groupname secp256r1 \
-   -sigalg SHA256withECDSA -keystore my.p12 -storetype pkcs12 -validity 9125 \
-   -storepass '<pw>' -keypass '<pw>' -dname "C=CN,O=Me,OU=Dev,CN=my-key"`
-2. `keytool -certreq -alias my-key -keystore my.p12 -storetype pkcs12 -file my.csr -storepass '<pw>'`
-3. In AGC: register the bundle name (APP ID) → upload `my.csr` to get a **debug
-   certificate** `.cer` → register the device UDID → create a **debug profile**
-   `.p7b` bound to that certificate and device.
-4. Put `my.p12`, `*.cer`, `*.p7b` in `./signing/`.
+1. `HAPD_P12_PWD='<pw>' hapd keygen --name my-key -o signing`
+   (creates `signing/my-key.p12` and `signing/my-key.csr`; plain `keytool` works too)
+2. In AGC: register the bundle name (APP ID) → upload `my-key.csr` to get a
+   **debug certificate** `.cer` → register the device UDID → create a **debug
+   profile** `.p7b` bound to that certificate and device.
+3. Put `*.cer` and `*.p7b` next to the `.p12` in `./signing/`.
 
 Full walkthrough with screenshots-level detail: [docs/harmonyos-signing.md](docs/harmonyos-signing.md).
 
@@ -148,7 +146,9 @@ hapd log --filter myapp
 | `hapd info <hap>` | Inspect bundle name, version, API levels, permissions, abilities. |
 | `hapd profiles` | List local profiles: bundle name, expiry, device count. |
 | `hapd sign <hap>` | Sign only. |
-| `hapd install <hap>` | Install (add `--sign` to sign first). |
+| `hapd install <hap>` | Install (add `--sign` to sign first, `--uninstall` to replace, `--replace` to recover from `9568332`). |
+| `hapd uninstall <bundle>` | Remove a bundle (`--hap` reads the name from a package). |
+| `hapd keygen` | Create a `.p12` + `.csr` for AppGallery Connect. |
 | `hapd run <bundle>` | Start an ability (`--hap` reads `mainElement` from the package). |
 | `hapd log [--filter X]` | Stream `hilog`. |
 | `hapd deploy <hap>` | sign → install → run. |

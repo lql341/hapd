@@ -113,6 +113,21 @@ Install a pre-signed HAP without re-signing:
 hapd install ./app-signed.hap
 ```
 
+Replace an installed build (only when the user accepts losing app data — the
+uninstall wipes it):
+
+```bash
+hapd install ./app-signed.hap --replace     # on 9568332: uninstall + retry
+hapd uninstall com.example.app
+```
+
+Create a keystore and CSR when the human has no signing material yet:
+
+```bash
+HAPD_P12_PWD=... hapd keygen --name my-key -o signing
+# then the human uploads signing/my-key.csr to AppGallery Connect
+```
+
 Re-target a HAP that was signed for someone else:
 
 ```bash
@@ -148,7 +163,7 @@ hapd log --filter com.example.app      # streams hilog; long-running
 | `9568257 fail to verify pkcs7 file` | chain does not reach a trusted root (OpenHarmony community certs) | requires AGC debug material — human step |
 | `9568322` | HAP bundle ≠ profile bundle | `--rename-bundle <profile bundle>` (get it from `hapd --json profiles`) |
 | `9568289` | permission not granted by profile | add `--strip-unsupported` |
-| `9568332` | same bundle installed with another signature | uninstall, then install |
+| `9568332` | same bundle installed with another signature | retry with `--replace` (destroys app data) or uninstall first |
 | `9568266` | device UDID missing from profile | human must add device in AGC and download a new profile |
 | `Unauthorized` from `devices` | phone did not accept the debug authorization | ask human to unlock and tap "always allow" |
 | `verify certificate chain failed` | `.cer` was already leaf-first, or corrupted | re-download from AGC; `hapd` reorders automatically |

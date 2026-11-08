@@ -58,13 +58,11 @@ unzip commandline-tools-linux-x64-<version>.zip -d ~/opt/apps/harmonyos/<version
 HAP 必须用设备信任的证书签名。**OpenHarmony 社区证书在商业鸿蒙设备上会被拒绝**
 （`9568257`），所以必须用 AGC 的材料：
 
-1. `keytool -genkeypair -alias my-key -keyalg EC -groupname secp256r1 \
-   -sigalg SHA256withECDSA -keystore my.p12 -storetype pkcs12 -validity 9125 \
-   -storepass '<密码>' -keypass '<密码>' -dname "C=CN,O=Me,OU=Dev,CN=my-key"`
-2. `keytool -certreq -alias my-key -keystore my.p12 -storetype pkcs12 -file my.csr -storepass '<密码>'`
-3. AGC 里：登记包名（APP ID）→ 上传 `my.csr` 拿**调试证书** `.cer` →
+1. `HAPD_P12_PWD='<密码>' hapd keygen --name my-key -o signing`
+   （生成 `signing/my-key.p12` 和 `signing/my-key.csr`；直接用 `keytool` 也行）
+2. AGC 里：登记包名（APP ID）→ 上传 `my-key.csr` 拿**调试证书** `.cer` →
    登记设备 UDID → 创建绑定该证书和设备的**调试 Profile** `.p7b`
-4. 把 `my.p12`、`*.cer`、`*.p7b` 放进 `./signing/`
+3. 把 `*.cer` 和 `*.p7b` 跟 `.p12` 一起放进 `./signing/`
 
 详细步骤见 [docs/harmonyos-signing.md](docs/harmonyos-signing.md)。
 
@@ -145,7 +143,9 @@ hapd log --filter myapp
 | `hapd info <hap>` | 查看包名、版本、API、权限、Ability |
 | `hapd profiles` | 列出本地 Profile：包名、有效期、设备数 |
 | `hapd sign <hap>` | 只签名 |
-| `hapd install <hap>` | 安装（加 `--sign` 先签名） |
+| `hapd install <hap>` | 安装（`--sign` 先签名，`--uninstall` 先卸载，`--replace` 从 `9568332` 自动恢复） |
+| `hapd uninstall <bundle>` | 卸载（`--hap` 从包里读包名） |
+| `hapd keygen` | 生成 AGC 要用的 `.p12` + `.csr` |
 | `hapd run <bundle>` | 启动 Ability（`--hap` 可从包里读 `mainElement`） |
 | `hapd log [--filter X]` | 跟 hilog |
 | `hapd deploy <hap>` | 签名 → 安装 → 启动 |
