@@ -164,7 +164,7 @@ hapd log --filter myapp
 | `hapd devices` | List connected devices. |
 | `hapd connect <ip:port>` | Wireless connect (`hdc tconn`). |
 | `hapd udid` | Print the device UDID (needed for AGC). |
-| `hapd info <hap>` | Inspect bundle name, version, API levels, permissions, abilities. |
+| `hapd info <hap>` | Inspect bundle name, version, API levels, permissions, abilities (`--verify` runs `verify-app`). |
 | `hapd profiles` | List local profiles: bundle name, expiry, device count. |
 | `hapd sign <hap...>` | Sign one or more packages. |
 | `hapd install <hap...>` | Install one or more packages (add `--sign` to sign first, `--uninstall` to replace, `--replace` to recover from `9568332`). |
@@ -172,12 +172,13 @@ hapd log --filter myapp
 | `hapd keygen` | Create a `.p12` + `.csr` for AppGallery Connect. |
 | `hapd renew` | Compare new signing material with the current one before the certificate expires. |
 | `hapd screenshot` | Grab a device screenshot (`-o file`). |
-| `hapd push` / `hapd pull` | Move files to and from the device. |
+| `hapd push <local> <remote>` | Push a file to the device. |
+| `hapd pull <remote> [local]` | Pull a file from the device. |
 | `hapd run <bundle>` | Start an ability (`--hap` reads `mainElement` from the package). |
 | `hapd log [--filter X]` | Stream `hilog`. |
 | `hapd deploy <hap...>` | sign → install → run (`--auto-fix` retries on `9568332` / `9568289`). |
-| `hapd update <url\|path>` | Download a build, then deploy. |
-| `hapd explain <code>` | Decode a device error code. |
+| `hapd update <url|path>` | Download a build, then deploy. |
+| `hapd explain <code>` | Decode a device error code (works without the Command Line Tools). |
 
 Global flags: `--json`, `--dry-run`, `--version`.
 
@@ -264,7 +265,8 @@ inputs, `3` missing dependency, `4` signing or verification failed,
 | `9568257` fail to verify pkcs7 file | Chain does not lead to a trusted root (usually OpenHarmony community certs) | Sign with AGC debug material |
 | `9568322` | HAP bundle name ≠ profile bundle name | `--rename-bundle` or create a matching profile |
 | `9568289` | A requested permission is not granted by the profile | `--strip-unsupported` |
-| `9568332` | Same bundle installed with a different signature | `hapd install --uninstall` / uninstall first |
+| `9568332` | Same bundle installed with a different signature | `hapd install --replace` (destroys app data) or uninstall first |
+| `9568263` | Version downgrade: a higher `versionCode` is already installed | install a newer build, or `--replace` |
 | `9568266` | Device UDID not in the profile | Add it in AGC, download a new profile, re-sign |
 | `10106102` | `aa start` refused while the screen is locked | Unlock the phone |
 | `verify certificate chain failed` | `.cer` is root-first | Handled automatically; make sure you did not strip it |

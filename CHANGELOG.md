@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1 - 2026-11-08
+
+- Add `9568263` (version downgrade) and `9568386` (bundle not installed) to the
+  error table; `--replace` / `--auto-fix` now treat a downgrade like a signature
+  conflict (uninstall, then retry).
+- `install` preflight compares the installed `versionCode` with the package's and
+  warns about an imminent `9568263` instead of failing blind.
+- `installed_version()` / `parse_version_code()` are pure functions with tests.
+- Consistent exit codes: expected failures raise `HapdError` (with `.code`)
+  instead of `SystemExit`, so library use and tests can distinguish them.
+- `devices`, `udid` and `connect` are real functions (they were lambdas), emit
+  `--json`, and `connect` is no longer reported as failing for the harmless
+  "Target is connected, repeat operation" response.
+- `doctor` reports a missing or unparsable profile as a check instead of aborting.
+- Declare the version once in `VERSION`; `install.sh` reads it, and tests assert
+  `VERSION`, `hapd`, `CHANGELOG.md` and the modulefile template agree.
+- 31 tests.
+
 ## 0.3.0 - 2026-11-08
 
 - Shared packages (HSP) co-installation: `sign`/`install`/`deploy` accept several

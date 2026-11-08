@@ -159,7 +159,7 @@ hapd log --filter myapp
 | `hapd devices` | 列出已连接设备 |
 | `hapd connect <ip:port>` | 无线连接 |
 | `hapd udid` | 打印设备 UDID（AGC 注册用） |
-| `hapd info <hap>` | 查看包名、版本、API、权限、Ability |
+| `hapd info <hap>` | 查看包名、版本、API、权限、Ability（`--verify` 走 `verify-app` 验签） |
 | `hapd profiles` | 列出本地 Profile：包名、有效期、设备数 |
 | `hapd sign <hap...>` | 给一个或多个包签名 |
 | `hapd install <hap...>` | 安装一个或多个包（`--sign` 先签名，`--uninstall` 先卸载，`--replace` 从 `9568332` 自动恢复） |
@@ -167,12 +167,13 @@ hapd log --filter myapp
 | `hapd keygen` | 生成 AGC 要用的 `.p12` + `.csr` |
 | `hapd renew` | 证书到期前，比对新的签名材料与当前的是否同一身份 |
 | `hapd screenshot` | 截图（`-o 文件`） |
-| `hapd push` / `hapd pull` | 往设备传文件 / 从设备取文件 |
+| `hapd push <local> <remote>` | 往设备传文件 |
+| `hapd pull <remote> [local]` | 从设备取文件 |
 | `hapd run <bundle>` | 启动 Ability（`--hap` 可从包里读 `mainElement`） |
 | `hapd log [--filter X]` | 跟 hilog |
 | `hapd deploy <hap...>` | 签名 → 安装 → 启动（`--auto-fix` 遇 `9568332`/`9568289` 自动重试） |
-| `hapd update <url\|路径>` | 下载新构建后直接部署 |
-| `hapd explain <code>` | 解释设备错误码 |
+| `hapd update <url|path>` | 下载新构建后直接部署 |
+| `hapd explain <code>` | 解释设备错误码（不需要装 Command Line Tools） |
 
 全局参数：`--json`、`--dry-run`、`--version`。
 
@@ -252,7 +253,8 @@ hapd --json deploy app.hap   # -> {"out": ..., "bundle": ...}
 | `9568257` fail to verify pkcs7 file | 证书链根不被设备信任（多半是社区证书） | 改用 AGC 调试材料 |
 | `9568322` | 包名与 Profile 的 bundle-name 不一致 | `--rename-bundle` 或新建 Profile |
 | `9568289` | 申请的权限 Profile 没授权 | `--strip-unsupported` |
-| `9568332` | 同包名已装且签名不同 | 先卸载再装 |
+| `9568332` | 同包名已装且签名不同 | `hapd install --replace`（会丢应用数据）或先卸载 |
+| `9568263` | 版本降级：已装的 `versionCode` 更高 | 换更新的包，或 `--replace` |
 | `9568266` | 设备 UDID 不在 Profile 里 | 去 AGC 加设备、下新 Profile、重签 |
 | `10106102` | 锁屏状态下拒绝 `aa start` | 解锁手机 |
 | `verify certificate chain failed` | `.cer` 是根在前 | 已自动处理；确认没把证书文件改坏 |

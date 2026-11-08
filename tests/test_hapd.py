@@ -79,8 +79,8 @@ class TestHapInfo(TempDir):
         self.assertEqual(info["permissions"], ["ohos.permission.INTERNET"])
         self.assertFalse(info["signed"])
 
-    def test_missing_file_exits_2(self):
-        with self.assertRaises(SystemExit) as cm:
+    def test_missing_file_raises_with_code_2(self):
+        with self.assertRaises(hapd.HapdError) as cm:
             hapd.hap_info(os.path.join(self.tmp, "nope.hap"))
         self.assertEqual(cm.exception.code, 2)
 
@@ -134,7 +134,7 @@ class TestRewrite(TempDir):
 
     def test_same_path_rejected(self):
         src = make_hap(os.path.join(self.tmp, "a.hap"))
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(hapd.HapdError):
             hapd.rewrite_hap(src, src, bundle_name="x")
 
 
@@ -175,13 +175,15 @@ class TestChainOrder(TempDir):
         inter = self._cert("inter", "Inter CA", issuer_cn="root", ca=True)
         leaf = self._cert("leaf", "Leaf", issuer_cn="inter")
         cer = os.path.join(self.tmp, "chain.cer")
-        with open(cer, "w") as f:                       # AGC order: root, inter, leaf
+        with open(cer, "w") as out:                     # AGC order: root, inter, leaf
             for p in (root, inter, leaf):
-                f.write(open(p).read())
+                with open(p) as src:
+                    out.write(src.read())
         out = os.path.join(self.tmp, "ordered.pem")
         _, n = hapd.order_chain(cer, out)
         self.assertEqual(n, 3)
-        text = open(out).read()
+        with open(out) as f:
+            text = f.read()
         subjects = [hapd._cert_field(c, "subject")
                     for c in hapd._pem_blocks(text)]
         self.assertIn("Leaf", subjects[0])
@@ -197,8 +199,10 @@ class TestChainOrder(TempDir):
     def test_pubkey_fingerprint_stable_across_reissue(self):
         a = self._cert("a", "Same Key")
         b = self._cert("b", "Same Key Again", issuer_cn="a")
-        pem_a = open(a).read()
-        pem_b = hapd._pem_blocks(open(b).read())[0]
+        with open(a) as f:
+            pem_a = f.read()
+        with open(b) as f:
+            pem_b = hapd._pem_blocks(f.read())[0]
         # different certificates, different keys -> different fingerprints
         self.assertNotEqual(hapd.pubkey_fp(pem_a), hapd.pubkey_fp(pem_b))
         # same certificate -> same fingerprint
@@ -286,12 +290,59 @@ class TestCliOffline(TempDir):
         self.assertEqual(doc["module_type"], "entry")
 
 
+class TestVersionParsing(unittest.TestCase):
+    def test_picks_the_bundle_version(self):
+        dump = (
+            '{"appId": "com.x_y", "versionCode": 0,'
+            ' "applicationInfo": {"versionCode": 2026110201,'
+            ' "minCompatibleVersionCode": 2026110201}}'
+        )
+        self.assertEqual(hapd.parse_version_code(dump), 2026110201)
+
+    def test_returns_none_when_absent(self):
+        self.assertIsNone(hapd.parse_version_code("error: bundle not found"))
+
+    def test_error_table_covers_blocking_codes(self):
+        for code in ("9568263", "9568266", "9568332"):
+            self.assertIn(code, hapd.ERRORS)
+
+
 class TestErrorTable(unittest.TestCase):
     def test_known_codes_have_guidance(self):
         for code in ("9568257", "9568289", "9568322", "9568332", "10106102"):
             self.assertIn(code, hapd.ERRORS)
             title, why, fix = hapd.ERRORS[code]
             self.assertTrue(all([title, why, fix]))
+
+
+class TestConsistency(unittest.TestCase):
+    def test_version_file_matches_script(self):
+        with open(os.path.join(ROOT, "VERSION")) as f:
+            v = f.read().strip()
+        with open(os.path.join(ROOT, "hapd")) as f:
+            m = [l for l in f if l.startswith("VERSION = ")]
+        self.assertTrue(m, "VERSION assignment not found in hapd")
+        self.assertIn(f'"{v}"', m[0], f"VERSION file says {v}, hapd says {m[0].strip()}")
+
+    def test_changelog_has_current_version(self):
+        with open(os.path.join(ROOT, "VERSION")) as f:
+            v = f.read().strip()
+        with open(os.path.join(ROOT, "CHANGELOG.md")) as f:
+            self.assertIn(f"## {v} ", f.read())
+
+    def test_modulefile_template_exists_for_version(self):
+        with open(os.path.join(ROOT, "VERSION")) as f:
+            v = f.read().strip()
+        self.assertTrue(os.path.isfile(
+            os.path.join(ROOT, "modulefiles", "hapd", f"{v}.in")))
+
+    def test_no_signing_material_tracked(self):
+        out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True)
+        if out.returncode != 0:
+            self.skipTest("not a git checkout")
+        bad = [f for f in out.stdout.split() if f.endswith(
+            (".p12", ".p7b", ".cer", ".csr", ".hap", ".hsp")) or f == "hapd.local.tcl"]
+        self.assertEqual(bad, [])
 
 
 class TestCli(unittest.TestCase):

@@ -20,7 +20,7 @@ import time
 import zipfile
 from datetime import datetime
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"   # keep in sync with ./VERSION and CHANGELOG.md
 
 # --------------------------------------------------------------------------
 # error codes seen while installing/debugging HAPs
@@ -43,6 +43,13 @@ ERRORS = {
     "10106102": ("Ability launch refused: device screen locked",
                  "HarmonyOS refuses `aa start` while the screen is locked.",
                  "Unlock the phone and retry."),
+    "9568263": ("Install rejected: version downgrade",
+                "A build with a higher versionCode is already installed.",
+                "Install a newer build, or uninstall the installed one first "
+                "(`hapd install --replace`, which wipes app data)."),
+    "9568386": ("Uninstall failed: bundle not installed",
+                "Nothing to remove under that bundle name.",
+                "Check the bundle name with `hapd info <hap>`."),
     "9568266": ("Device not in profile's device list",
                 "The profile's debug-info.device-ids does not contain this device's UDID.",
                 "Register the UDID in AGC, download a new profile, then re-sign."),
@@ -53,9 +60,17 @@ def eprint(*a):
     print(*a, file=sys.stderr)
 
 
+class HapdError(Exception):
+    """Expected, user-facing failure. Carries the process exit code."""
+
+    def __init__(self, msg, code=1):
+        super().__init__(msg)
+        self.msg = msg
+        self.code = code
+
+
 def die(msg, code=1):
-    eprint(f"hapd: {msg}")
-    sys.exit(code)
+    raise HapdError(msg, code)
 
 
 # --------------------------------------------------------------------------
@@ -248,7 +263,8 @@ def order_chain(cer_path, out_path):
     """AGC ships the chain root-first; hap-sign-tool wants leaf-first."""
     if not shutil.which("openssl"):
         die("openssl not found - required to reorder the certificate chain", code=3)
-    text = open(cer_path, encoding="utf-8", errors="ignore").read()
+    with open(cer_path, encoding="utf-8", errors="ignore") as f:
+        text = f.read()
     pems = [p.strip() + "\n" for p in _pem_blocks(text)]
     if not pems:
         # binary DER / PKCS#7 container
@@ -287,7 +303,8 @@ def profile_info(p7b_path, jar):
                  "-outFile", out], check=False)
         if not os.path.isfile(out) or os.path.getsize(out) == 0:
             raise RuntimeError(f"cannot parse profile: {(r.stdout or '') + (r.stderr or '')}")
-        doc = json.load(open(out))["content"]
+        with open(out) as f:
+            doc = json.load(f)["content"]
     finally:
         if os.path.exists(out):
             os.unlink(out)
@@ -484,20 +501,23 @@ def cmd_doctor(args, hdc_path, jar):
 
     try:
         p12, cer, p7b, alias, pwd = sign_material(args, jar)
-        prov = profile_info(p7b, jar)
+    except HapdError as e:
+        add("signing material", False, e.msg)
+    else:
         add("signing material", True, f"p12={os.path.basename(p12)} alias={alias} "
                                       f"profile={os.path.basename(p7b)}")
-        add("profile valid", (prov["days_left"] or 0) > 0,
-            f"bundle={prov['bundle_name']} expires={prov['expires']} "
-            f"({prov['days_left']} days left)")
-        if ds and prov["device_ids"]:
-            udid = device_udid(hdc_path, ds[0]["target"])
-            add("device in profile", udid in prov["device_ids"],
-                f"udid={udid[:16]}..." if udid else "cannot read UDID")
-    except SystemExit:
-        add("signing material", False,
-            "incomplete: need --p12/--cert/--profile and --password "
-            "(or HAPD_P12_PWD) or a ./signing/ directory")
+        try:
+            prov = profile_info(p7b, jar)
+        except (HapdError, RuntimeError) as e:
+            add("profile readable", False, str(e).splitlines()[0][:160])
+        else:
+            add("profile valid", (prov["days_left"] or 0) > 0,
+                f"bundle={prov['bundle_name']} expires={prov['expires']} "
+                f"({prov['days_left']} days left)")
+            if ds and prov["device_ids"]:
+                udid = device_udid(hdc_path, ds[0]["target"])
+                add("device in profile", udid in prov["device_ids"],
+                    f"udid={udid[:16]}..." if udid else "cannot read UDID")
 
     if args.json:
         print(json.dumps(rep, indent=2))
@@ -512,6 +532,66 @@ def device_udid(hdc_path, target):
     r = hdc(["-t", target, "shell", "bm", "get", "--udid"], hdc_path, check=False)
     m = re.search(r"([0-9A-Fa-f]{32,64})", (r.stdout or "") + (r.stderr or ""))
     return m.group(1) if m else None
+
+
+def installed_version(hdc_path, target, bundle):
+    """Return the installed versionCode for a bundle, or None."""
+    if not bundle:
+        return None
+    r = hdc(["-t", target, "shell", "bm", "dump", "-n", bundle], hdc_path, check=False) \
+        if target else \
+        hdc(["shell", "bm", "dump", "-n", bundle], hdc_path, check=False)
+    return parse_version_code((r.stdout or "") + (r.stderr or ""))
+
+
+def parse_version_code(bm_dump_text):
+    """Pull the bundle's own versionCode out of `bm dump` output.
+
+    The dump contains several "versionCode" keys (dependencies, minCompatible…);
+    the bundle's own one is the last top-of-record occurrence, so take the
+    maximum seen - that is the app's own code in every layout observed.
+    """
+    codes = [int(m) for m in re.findall(r'"versionCode":\s*(\d+)', bm_dump_text)]
+    return max(codes) if codes else None
+
+
+def cmd_devices(args, hdc_path, jar):
+    ds = devices(hdc_path)
+    if args.json:
+        print(json.dumps(ds, indent=2))
+    elif not ds:
+        print("no devices connected (hapd connect <ip:port>)")
+    else:
+        for d in ds:
+            print(f"{d['target']:<24} {d['state']:<14} {d['transport']}")
+    return 0
+
+
+def cmd_udid(args, hdc_path, jar):
+    tgt = pick_target(hdc_path, args.target)
+    udid = device_udid(hdc_path, tgt) if tgt else None
+    if args.json:
+        print(json.dumps({"target": tgt, "udid": udid}, indent=2))
+    else:
+        print(udid or "not connected")
+    return 0 if udid else 1
+
+
+def cmd_connect(args, hdc_path, jar):
+    r = hdc(["tconn", args.addr], hdc_path, dry_run=args.dry_run, check=False)
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    low = txt.lower()
+    ok = args.dry_run or "connect ok" in low or "repeat operation" in low
+    if args.json:
+        print(json.dumps({"ok": ok, "addr": args.addr, "output": txt}, indent=2))
+    else:
+        print(txt or ("connected to " + args.addr if ok else "failed"))
+    if ok:
+        ds = [d for d in devices(hdc_path) if d["state"].lower() == "connected"]
+        if not args.json and not ds:
+            eprint("note: connect accepted, but the device is not 'Connected' yet - "
+                   "unlock the phone and accept the debug authorization dialog")
+    return 0 if ok else 5
 
 
 def cmd_info(args, hdc_path, jar):
@@ -608,7 +688,7 @@ def order_for_install(paths):
     for p in paths:
         try:
             kind = hap_info(p).get("module_type")
-        except SystemExit:
+        except HapdError:
             kind = None
         (shared if kind == "shared" else normal).append(p)
     return shared, normal
@@ -628,12 +708,23 @@ def cmd_install(args, hdc_path, jar):
     for f in files:
         try:
             bundle = bundle or hap_info(f)["bundle_name"]
-        except SystemExit:
+        except HapdError:
             pass
 
     if getattr(args, "uninstall", False) and bundle:
         ok, _ = _uninstall(hdc_path, tgt, bundle, args.dry_run)
         eprint(f"  uninstall {bundle}: {'ok' if ok else 'not installed'}")
+
+    if not args.dry_run and bundle and tgt and not getattr(args, "uninstall", False):
+        try:
+            pkg_code = hap_info(next(f for f in files if hap_info(f)["module_type"] != "shared"))["version_code"]
+        except (HapdError, StopIteration):
+            pkg_code = None
+        have = installed_version(hdc_path, tgt, bundle)
+        if pkg_code and have and have > pkg_code:
+            eprint(f"warning: installed {bundle} has versionCode {have}, this package has "
+                   f"{pkg_code} -> the device will refuse it as a downgrade (9568263); "
+                   f"use --replace to uninstall first (app data is lost)")
 
     results = []
     ok_all = True
@@ -641,9 +732,11 @@ def cmd_install(args, hdc_path, jar):
     for pkg, is_shared in [(p, True) for p in shared] + [(p, False) for p in normal]:
         label = "shared" if is_shared else "module"
         ok, txt = _install_once(hdc_path, tgt, pkg, args.dry_run, shared=is_shared)
-        if (not ok and getattr(args, "replace", False) and "9568332" in txt
+        blocking = "9568332" in txt or "9568263" in txt
+        if (not ok and getattr(args, "replace", False) and blocking
                 and bundle and not is_shared):
-            eprint(f"  9568332: signature differs, replacing installed {bundle}")
+            eprint(f"  {txt.split('code:')[-1][:7]}: existing install blocks this one, "
+                   f"uninstalling {bundle}")
             _uninstall(hdc_path, tgt, bundle, args.dry_run)
             ok, txt = _install_once(hdc_path, tgt, pkg, args.dry_run, shared=is_shared)
         if not ok:
@@ -653,9 +746,9 @@ def cmd_install(args, hdc_path, jar):
                 eprint("hint: " + hint)
         results.append({"file": os.path.basename(pkg), "kind": label, "ok": ok, "output": txt})
         if not args.json:
-            print(f"[{label}] {os.path.basename(pkg)}: {'ok' if ok else 'FAILED'}")
+            print(f"[{label}] {os.path.basename(pkg)}: {'ok' if ok else 'FAILED'}", flush=True)
             if not ok:
-                print("  " + txt.replace("\n", "\n  "))
+                print("  " + txt.replace("\n", "\n  "), flush=True)
         if not ok:
             break
 
@@ -765,7 +858,8 @@ def pubkey_fp(pem):
 def _cert_pubkey_fp(cert_path):
     if not os.path.isfile(cert_path):
         return None
-    text = open(cert_path, encoding="utf-8", errors="ignore").read()
+    with open(cert_path, encoding="utf-8", errors="ignore") as f:
+        text = f.read()
     pems = _pem_blocks(text)
     if not pems:
         return None
@@ -885,7 +979,7 @@ def _preflight(args, hdc_path, jar, bundle):
     try:
         p12, cer, p7b, alias, pwd = sign_material(args, jar)
         prov = profile_info(p7b, jar)
-    except SystemExit:
+    except (HapdError, RuntimeError):
         return
     if prov["device_ids"] and udid not in prov["device_ids"]:
         eprint(f"warning: device {udid[:16]}... is not in the profile's device list; "
@@ -908,7 +1002,7 @@ def cmd_deploy(args, hdc_path, jar):
         if not args.no_run:
             try:
                 bundle = hap_info(files[0])["bundle_name"]
-            except SystemExit:
+            except HapdError:
                 bundle = "<bundle>"
             print(f"[dry-run] {hdc_path} shell aa start -a EntryAbility -b {bundle} -m entry")
         return 0
@@ -937,8 +1031,9 @@ def cmd_deploy(args, hdc_path, jar):
             break
     if not ok_all and args.auto_fix:
         for attempt in range(1, args.max_fix + 1):
-            if "9568332" in txt:
-                eprint(f"  [auto-fix {attempt}] 9568332: uninstalling {bundle}")
+            if "9568332" in txt or "9568263" in txt:
+                eprint(f"  [auto-fix {attempt}] existing install blocks this one: "
+                       f"uninstalling {bundle}")
                 _uninstall(hdc_path, tgt, bundle, args.dry_run)
             elif "9568289" in txt and not args.strip_unsupported:
                 eprint(f"  [auto-fix {attempt}] 9568289: stripping unsupported permissions")
@@ -982,7 +1077,7 @@ def cmd_deploy(args, hdc_path, jar):
 def _module_type(path):
     try:
         return hap_info(path).get("module_type")
-    except SystemExit:
+    except HapdError:
         return None
 
 
@@ -1059,20 +1154,15 @@ def build_parser():
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("devices", help="list connected devices")
-    sp.set_defaults(func=lambda a, h, j: (print(json.dumps(devices(h), indent=2))
-                                          if a.json else
-                                          [print(f"{d['target']:<24} {d['state']:<12} {d['transport']}")
-                                           for d in devices(h)]) and 0)
+    sp.set_defaults(func=cmd_devices)
 
     sp = sub.add_parser("udid", help="print the device UDID (needed for AGC)")
     sp.add_argument("--target")
-    sp.set_defaults(func=lambda a, h, j: (print(device_udid(h, pick_target(h, a.target)) or
-                                               "not connected")) and 0)
+    sp.set_defaults(func=cmd_udid)
 
     sp = sub.add_parser("connect", help="connect over WLAN (hdc tconn ip:port)")
     sp.add_argument("addr")
-    sp.set_defaults(func=lambda a, h, j: (print(hdc(["tconn", a.addr], h, a.dry_run,
-                                                   check=False).stdout.strip()) or "ok") and 0)
+    sp.set_defaults(func=cmd_connect)
 
     sp = sub.add_parser("info", help="inspect a HAP without touching a device")
     sp.add_argument("hap")
@@ -1198,8 +1288,12 @@ def main(argv=None):
         return args.func(args, hdc_path, jar)
     except DryRun:
         return 0
+    except HapdError as e:
+        eprint(f"hapd: {e.msg}")
+        return e.code
     except RuntimeError as e:
-        die(str(e), code=4)
+        eprint(f"hapd: {e}")
+        return 4
 
 
 if __name__ == "__main__":

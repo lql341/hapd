@@ -10,8 +10,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$ROOT/hapd" | head -1)"
-[[ -n $VERSION ]] || { echo "cannot read VERSION from $ROOT/hapd" >&2; exit 1; }
+VERSION="$(tr -d '\n\r ' < "$ROOT/VERSION")"
+[[ -n $VERSION ]] || { echo "missing $ROOT/VERSION" >&2; exit 1; }
 
 MODULE_DIR="${MODULEFILES_DIR:-$HOME/opt/modulefiles}"
 LINK=1
