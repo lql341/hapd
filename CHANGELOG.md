@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.3 - 2026-11-08
+
+- **`--strip-unsupported` no longer strips normal-level permissions.** It compared
+  every requested permission against the profile's `allowed-acls` /
+  `restricted-permissions`, which only list *ACL* permissions - so a profile with
+  no ACLs caused `INTERNET`, `CAMERA` and friends to be dropped, producing a
+  signed-but-broken app. It now reads `PermissionDefinitions.json` from the
+  toolchain and drops only `system_basic` / `system_core` permissions the profile
+  does not grant. Unknown permissions are kept.
+- `_default_out` keeps the input extension: an `.hsp` is no longer written as
+  `-signed.hap`.
+- `deploy --dry-run` honours `-o` and `--rename-bundle` and prints the resulting
+  install/launch commands for the signed artefacts.
+- 37 tests.
+
 ## 0.3.2 - 2026-11-08
 
 - Fix `parse_version_code`: `bm dump -n` output contains a nested

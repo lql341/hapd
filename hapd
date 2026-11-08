@@ -20,7 +20,7 @@ import time
 import zipfile
 from datetime import datetime
 
-VERSION = "0.3.2"   # keep in sync with ./VERSION and CHANGELOG.md
+VERSION = "0.3.3"   # keep in sync with ./VERSION and CHANGELOG.md
 
 # --------------------------------------------------------------------------
 # error codes seen while installing/debugging HAPs
@@ -229,6 +229,37 @@ def rewrite_hap(src, dst, bundle_name=None, drop_permissions=(), add_permissions
     return dst
 
 
+def load_permission_defs(jar):
+    """availableLevel for each permission, from the toolchain's definitions file."""
+    path = os.path.join(os.path.dirname(jar), "PermissionDefinitions.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    items = doc.get("definePermissions") or doc.get("permissions") or []
+    return {p.get("name"): p.get("availableLevel", "normal")
+            for p in items if isinstance(p, dict) and p.get("name")}
+
+
+def permissions_to_drop(requested, allowed, defs):
+    """Which requested permissions the profile cannot grant.
+
+    `allowed-acls` / `restricted-permissions` only list *ACL* (privileged)
+    permissions. Normal-level permissions are granted by the profile implicitly
+    and must NOT be stripped - dropping INTERNET would install a broken app.
+    """
+    allowed = set(allowed or ())
+    drop = []
+    for name in requested:
+        if name in allowed:
+            continue
+        level = (defs or {}).get(name, "normal")
+        if level in ("system_basic", "system_core"):
+            drop.append(name)
+    return drop
+
+
 def strip_unsupported(hap_path, profile_perms, out_path):
     """Remove permissions the profile does not allow (fixes 9568289)."""
     info = hap_info(hap_path)
@@ -402,7 +433,11 @@ def do_sign(hap, out, args, jar):
         if args.strip_unsupported:
             allowed = set(prov["allowed_acls"]) | set(prov["restricted"])
             cur = hap_info(src)["permissions"]
-            drop += [p for p in cur if p not in allowed and p not in drop]
+            defs = load_permission_defs(jar)
+            pending = [p for p in permissions_to_drop(cur, allowed, defs) if p not in drop]
+            for name in pending:
+                eprint(f"  dropping {name} ({defs.get(name, '?')} - not granted by the profile)")
+            drop += pending
         if drop:
             tmp = os.path.join(work, "perms.hap")
             rewrite_hap(src, tmp, drop_permissions=drop)
@@ -683,10 +718,12 @@ def cmd_sign(args, hdc_path, jar):
     return 0
 
 
-def _default_out(hap):
-    if hap.endswith("-unsigned.hap"):
-        return hap[: -len("-unsigned.hap")] + "-signed.hap"
-    return hap[: -len(".hap")] + "-signed.hap"
+def _default_out(path):
+    """entry-unsigned.hap -> entry-signed.hap, lib-unsigned.hsp -> lib-signed.hsp."""
+    root, ext = os.path.splitext(path)
+    if root.endswith("-unsigned"):
+        root = root[: -len("-unsigned")]
+    return f"{root}-signed{ext or '.hap'}"
 
 
 def _install_once(hdc_path, target, hap, dry_run=False, shared=False):
@@ -1011,18 +1048,34 @@ def cmd_deploy(args, hdc_path, jar):
     files = list(args.hap)
 
     if args.dry_run:
-        shared, normal = order_for_install(files)
+        outs = []
+        outmap = {}
         for f in files:
-            print(f"[dry-run] sign {f} -> {_default_out(f)}")
+            out = args.output if (args.output and len(files) == 1) else _default_out(f)
+            if args.rename_bundle:
+                print(f"[dry-run] sign {f} -> {out} "
+                      f"(bundle renamed -> {args.rename_bundle}, "
+                      f"permissions stripped: {bool(args.strip_unsupported)})")
+            else:
+                print(f"[dry-run] sign {f} -> {out}")
+            outs.append((f, out))
+            outmap[f] = out
+        # order by the inputs: the signed outputs do not exist yet in a dry run
+        shared, normal = order_for_install(files)
+        shared, normal = [outmap[f] for f in shared], [outmap[f] for f in normal]
         for pkg in shared:
             print(f"[dry-run] {hdc_path} install -r -s {pkg}")
         for pkg in normal:
             print(f"[dry-run] {hdc_path} install -r {pkg}")
         if not args.no_run:
-            try:
-                bundle = hap_info(files[0])["bundle_name"]
-            except HapdError:
-                bundle = "<bundle>"
+            bundle = args.rename_bundle
+            if not bundle:
+                try:
+                    bundle = hap_info(files[0])["bundle_name"]
+                except HapdError:
+                    bundle = "<bundle>"
+            entry = next((o for f, o in outs
+                          if _module_type(f) != "shared"), outs[0][1])
             print(f"[dry-run] {hdc_path} shell aa start -a EntryAbility -b {bundle} -m entry")
         return 0
 

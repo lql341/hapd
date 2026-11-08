@@ -259,9 +259,10 @@ class TestCliOffline(TempDir):
         lines = r.stdout.strip().splitlines()
         installs = [ln for ln in lines if "install -r" in ln]
         self.assertEqual(len(installs), 2)
-        self.assertIn("-r -s", installs[0])          # shared bundle first, with -s
+        self.assertIn("install -r -s ", installs[0])   # shared bundle first, with -s
         self.assertIn(".hsp", installs[0])
-        self.assertNotIn("-s", installs[1])
+        self.assertIn("install -r ", installs[1])
+        self.assertNotIn("install -r -s ", installs[1])
 
     def test_dry_run_sign_does_not_need_material(self):
         hap = make_hap(os.path.join(self.tmp, "a-unsigned.hap"))
@@ -288,6 +289,41 @@ class TestCliOffline(TempDir):
         doc = json.loads(r.stdout)
         self.assertEqual(doc["bundle_name"], "com.example.app")
         self.assertEqual(doc["module_type"], "entry")
+
+
+class TestPermissionStripping(unittest.TestCase):
+    DEFS = {
+        "ohos.permission.INTERNET": "normal",
+        "ohos.permission.CAMERA": "normal",
+        "ohos.permission.KEEP_BACKGROUND_RUNNING_SYSTEM": "system_basic",
+        "ohos.permission.READ_PASTEBOARD": "system_basic",
+        "ohos.permission.MANAGE_SYSTEM": "system_core",
+    }
+
+    def test_normal_permissions_are_never_dropped(self):
+        # the profile lists no ACLs, but INTERNET/CAMERA are implicitly granted
+        drop = hapd.permissions_to_drop(
+            ["ohos.permission.INTERNET", "ohos.permission.CAMERA"], [], self.DEFS)
+        self.assertEqual(drop, [])
+
+    def test_privileged_permissions_are_dropped(self):
+        drop = hapd.permissions_to_drop(
+            ["ohos.permission.INTERNET",
+             "ohos.permission.KEEP_BACKGROUND_RUNNING_SYSTEM",
+             "ohos.permission.MANAGE_SYSTEM"], [], self.DEFS)
+        self.assertEqual(drop, ["ohos.permission.KEEP_BACKGROUND_RUNNING_SYSTEM",
+                                "ohos.permission.MANAGE_SYSTEM"])
+
+    def test_acl_granted_permission_is_kept(self):
+        drop = hapd.permissions_to_drop(
+            ["ohos.permission.READ_PASTEBOARD"],
+            ["ohos.permission.READ_PASTEBOARD"], self.DEFS)
+        self.assertEqual(drop, [])
+
+    def test_unknown_permission_is_kept(self):
+        # no definition -> assume it is grantable; stripping blind breaks the app
+        drop = hapd.permissions_to_drop(["ohos.permission.SOMETHING_NEW"], [], self.DEFS)
+        self.assertEqual(drop, [])
 
 
 class TestVersionParsing(unittest.TestCase):
