@@ -266,6 +266,17 @@ class TestCliOffline(TempDir):
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn(r.returncode, (0, 3))
 
+    def test_explain_needs_no_toolchain(self):
+        r = self._run("--json", "explain", "9568257")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["code"], "9568257")
+
+    def test_info_needs_no_toolchain(self):
+        hap = make_hap(os.path.join(self.tmp, "a.hap"))
+        r = self._run("info", hap)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("com.example.app", r.stdout)
+
     def test_info_json_is_machine_readable(self):
         hap = make_hap(os.path.join(self.tmp, "a.hap"))
         r = self._run("--json", "info", hap)

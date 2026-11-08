@@ -529,6 +529,8 @@ def cmd_info(args, hdc_path, jar):
     print(f"deviceTypes : {', '.join(i['device_types'] or [])}")
     print(f"signed      : {i['signed']}")
     if getattr(args, "verify", False):
+        if not jar:
+            jar = find_toolchain()[1]
         tmp = tempfile.mkdtemp(prefix="hapd-v-")
         try:
             r = run([java_cmd(), "-jar", jar, "verify-app", "-inFile", args.hap,
@@ -1075,7 +1077,7 @@ def build_parser():
     sp = sub.add_parser("info", help="inspect a HAP without touching a device")
     sp.add_argument("hap")
     sp.add_argument("--verify", action="store_true", help="also run verify-app")
-    sp.set_defaults(func=cmd_info)
+    sp.set_defaults(func=cmd_info, needs_tools=False)
 
     sp = sub.add_parser("profiles", help="list local profiles with bundle/expiry")
     sp.add_argument("--signing-dir")
@@ -1182,13 +1184,16 @@ def build_parser():
 
     sp = sub.add_parser("explain", help="decode a device error code")
     sp.add_argument("code")
-    sp.set_defaults(func=cmd_explain)
+    sp.set_defaults(func=cmd_explain, needs_tools=False)
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    hdc_path, jar = find_toolchain()
+    if getattr(args, "needs_tools", True):
+        hdc_path, jar = find_toolchain()
+    else:
+        hdc_path, jar = None, None
     try:
         return args.func(args, hdc_path, jar)
     except DryRun:
