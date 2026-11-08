@@ -1,0 +1,23 @@
+# signing material — never commit
+*.p12
+*.p7b
+*.cer
+*.csr
+*.keystore
+*.jks
+signing/
+dist/
+
+# app packages
+*.hap
+*.hsp
+*.app
+*.hqf
+
+# python / tooling
+__pycache__/
+*.pyc
+.venv/
+.hvigor/
+.idea/
+*.log

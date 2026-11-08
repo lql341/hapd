@@ -1,0 +1,772 @@
+#!/usr/bin/env python3
+"""hapd - sign, install and debug HarmonyOS HAP packages from Linux.
+
+No DevEco Studio, no Windows, no macOS. Wraps the official HarmonyOS
+Command Line Tools (hdc + hap-sign-tool) into one non-interactive CLI.
+
+Every command supports --json for agent consumption.
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import zipfile
+from datetime import datetime
+
+VERSION = "0.1.0"
+
+# --------------------------------------------------------------------------
+# error codes seen while installing/debugging HAPs
+# --------------------------------------------------------------------------
+ERRORS = {
+    "9568257": ("Signature / profile rejected by the device",
+                "The HAP's signing chain does not lead to a root the device trusts "
+                "(e.g. OpenHarmony community certs), or the profile inside is broken.",
+                "Sign with an AppGallery Connect debug certificate + debug profile."),
+    "9568289": ("Install rejected: permission not granted",
+                "The HAP requests a permission that the profile does not allow.",
+                "Strip the permission (`hapd sign --drop-permission X`) or grant it in AGC."),
+    "9568322": ("Bundle name does not match the profile",
+                "The profile's bundle-name differs from the HAP's bundleName.",
+                "Rename the bundle (`hapd sign --rename-bundle <profile-bundle>`) or "
+                "create a profile for this bundle name."),
+    "9568332": ("Signature differs from the installed app",
+                "An app with the same bundle name is installed but signed with another key.",
+                "Uninstall first: `hapd uninstall <bundle>` then install."),
+    "10106102": ("Ability launch refused: device screen locked",
+                 "HarmonyOS refuses `aa start` while the screen is locked.",
+                 "Unlock the phone and retry."),
+    "9568266": ("Device not in profile's device list",
+                "The profile's debug-info.device-ids does not contain this device's UDID.",
+                "Register the UDID in AGC, download a new profile, then re-sign."),
+}
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+def die(msg, code=1):
+    eprint(f"hapd: {msg}")
+    sys.exit(code)
+
+
+# --------------------------------------------------------------------------
+# process helpers
+# --------------------------------------------------------------------------
+class DryRun(Exception):
+    pass
+
+
+def run(cmd, dry_run=False, capture=True, check=True, stdin=None):
+    if dry_run:
+        eprint("[dry-run] " + " ".join(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    r = subprocess.run(cmd, capture_output=capture, text=True, stdin=stdin)
+    if check and r.returncode != 0:
+        out = (r.stdout or "") + (r.stderr or "")
+        raise RuntimeError(f"command failed ({r.returncode}): {' '.join(cmd)}\n{out.strip()}")
+    return r
+
+
+# --------------------------------------------------------------------------
+# toolchain discovery
+# --------------------------------------------------------------------------
+def find_toolchain():
+    """Return (hdc_path, sign_tool_jar)."""
+    cands = []
+    if os.environ.get("HAPD_TOOLCHAIN"):
+        cands.append(os.environ["HAPD_TOOLCHAIN"])
+    if os.environ.get("COMMANDLINE_TOOL_DIR"):
+        cands.append(os.environ["COMMANDLINE_TOOL_DIR"])
+    cands.append(os.path.expanduser("~/opt/apps/harmonyos/command-line-tools"))
+    cands += sorted(glob.glob(os.path.expanduser("~/opt/apps/harmonyos/*/command-line-tools")),
+                    reverse=True)
+    cands.append(os.path.expanduser("~/command-line-tools"))
+
+    for clt in cands:
+        tc = os.path.join(clt, "sdk", "default", "openharmony", "toolchains")
+        hdc = os.path.join(tc, "hdc")
+        jar = os.path.join(tc, "lib", "hap-sign-tool.jar")
+        if os.path.isfile(hdc) and os.path.isfile(jar):
+            return hdc, jar
+
+    # last resort: PATH
+    hdc = shutil.which("hdc")
+    for clt in cands:
+        jar = os.path.join(clt, "sdk", "default", "openharmony", "toolchains", "lib",
+                           "hap-sign-tool.jar")
+        if os.path.isfile(jar) and hdc:
+            return hdc, jar
+    die("HarmonyOS Command Line Tools not found.\n"
+        "  Set HAPD_TOOLCHAIN=/path/to/command-line-tools or install them to\n"
+        "  ~/opt/apps/harmonyos/<version>/command-line-tools/", code=3)
+
+
+def java_cmd():
+    java = shutil.which("java")
+    if not java:
+        die("java not found (JDK 17 or 21 required to run hap-sign-tool)", code=3)
+    return java
+
+
+# --------------------------------------------------------------------------
+# HAP inspection
+# --------------------------------------------------------------------------
+def read_module_json(path):
+    with zipfile.ZipFile(path) as z:
+        try:
+            raw = z.read("module.json")
+        except KeyError:
+            die(f"{path} has no module.json - is this a HAP/HSP?", code=2)
+    return json.loads(raw)
+
+
+def hap_info(path):
+    app = read_module_json(path)["app"]
+    m = read_module_json(path)["module"]
+    return {
+        "path": os.path.abspath(path),
+        "size": os.path.getsize(path),
+        "bundle_name": app.get("bundleName"),
+        "version_name": app.get("versionName"),
+        "version_code": app.get("versionCode"),
+        "min_api": app.get("minAPIVersion"),
+        "target_api": app.get("targetAPIVersion"),
+        "module_name": m.get("name"),
+        "main_element": m.get("mainElement"),
+        "device_types": m.get("deviceTypes"),
+        "permissions": [p.get("name") for p in m.get("requestPermissions", [])],
+        "abilities": [a.get("name") for a in m.get("abilities", [])],
+        "extension_abilities": [a.get("name") for a in m.get("extensionAbilities", [])],
+        "signed": "META-INF" in zipfile.ZipFile(path).namelist(),
+    }
+
+
+def rewrite_hap(src, dst, bundle_name=None, drop_permissions=(), add_permissions=()):
+    """Rewrite module.json inside the HAP: rename bundle, edit permissions."""
+    if os.path.abspath(src) == os.path.abspath(dst):
+        die("rewrite_hap needs distinct src and dst")
+    with zipfile.ZipFile(src) as zin:
+        data = json.loads(zin.read("module.json"))
+
+        if bundle_name:
+            data["app"]["bundleName"] = bundle_name
+
+        mod = data.get("module", {})
+        perms = mod.get("requestPermissions", [])
+        drop = set(drop_permissions)
+        if drop:
+            perms = [p for p in perms if p.get("name") not in drop]
+        if add_permissions:
+            have = {p.get("name") for p in perms}
+            for name in add_permissions:
+                if name not in have:
+                    perms.append({"name": name})
+        mod["requestPermissions"] = perms
+        data["module"] = mod
+
+        payload = json.dumps(data, ensure_ascii=False).encode()
+
+        with zipfile.ZipFile(dst, "w") as zout:
+            for item in zin.infolist():
+                if item.filename == "module.json":
+                    zout.writestr(item, payload)
+                    continue
+                if item.filename == "pack.info":
+                    # keep metadata consistent with the renamed bundle
+                    try:
+                        pk = json.loads(zin.read(item))
+                        if bundle_name:
+                            pk["summary"]["app"]["bundleName"] = bundle_name
+                        zout.writestr(item, json.dumps(pk, ensure_ascii=False).encode())
+                    except Exception:
+                        zout.writestr(item, zin.read(item))
+                    continue
+                zout.writestr(item, zin.read(item))
+    return dst
+
+
+def strip_unsupported(hap_path, profile_perms, out_path):
+    """Remove permissions the profile does not allow (fixes 9568289)."""
+    info = hap_info(hap_path)
+    allowed = set(profile_perms)
+    unwanted = [p for p in info["permissions"] if p not in allowed]
+    if not unwanted:
+        return out_path, []
+    rewrite_hap(hap_path, out_path, drop_permissions=unwanted)
+    return out_path, unwanted
+
+
+# --------------------------------------------------------------------------
+# certificates / profiles
+# --------------------------------------------------------------------------
+def _pem_blocks(text):
+    return re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", text, re.S)
+
+
+def _openssl(args, data=None):
+    r = subprocess.run(["openssl"] + args, input=data, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"openssl {' '.join(args)} failed: {r.stderr.strip()}")
+    return r.stdout
+
+
+def _cert_field(pem, what):
+    out = _openssl(["x509", "-noout", "-nameopt", "RFC2253", "-" + what], pem).strip()
+    return out.split("=", 1)[1] if "=" in out else out
+
+
+def order_chain(cer_path, out_path):
+    """AGC ships the chain root-first; hap-sign-tool wants leaf-first."""
+    if not shutil.which("openssl"):
+        die("openssl not found - required to reorder the certificate chain", code=3)
+    text = open(cer_path, encoding="utf-8", errors="ignore").read()
+    pems = [p.strip() + "\n" for p in _pem_blocks(text)]
+    if not pems:
+        # binary DER / PKCS#7 container
+        try:
+            conv = _openssl(["pkcs7", "-inform", "DER", "-print_certs", "-in", cer_path])
+            pems = [p.strip() + "\n" for p in _pem_blocks(conv)]
+        except RuntimeError:
+            pems = [_openssl(["x509", "-inform", "DER", "-in", cer_path])]
+
+    if len(pems) > 1:
+        subjects = {_cert_field(c, "subject"): i for i, c in enumerate(pems)}
+        issuers = {_cert_field(c, "issuer"): i for i, c in enumerate(pems)}
+        leaves = [i for i in range(len(pems)) if _cert_field(pems[i], "subject") not in issuers]
+        if len(leaves) == 1:
+            chain, seen, cur = [pems[leaves[0]]], {leaves[0]}, leaves[0]
+            while True:
+                nxt = subjects.get(_cert_field(pems[cur], "issuer"))
+                if nxt is None or nxt in seen:
+                    break
+                chain.append(pems[nxt])
+                seen.add(nxt)
+                cur = nxt
+            chain += [c for i, c in enumerate(pems) if i not in seen]
+            pems = chain
+
+    with open(out_path, "w") as f:
+        f.writelines(pems)
+    return out_path, len(pems)
+
+
+def profile_info(p7b_path, jar):
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+        out = tf.name
+    try:
+        r = run([java_cmd(), "-jar", jar, "verify-profile", "-inFile", p7b_path,
+                 "-outFile", out], check=False)
+        if not os.path.isfile(out) or os.path.getsize(out) == 0:
+            raise RuntimeError(f"cannot parse profile: {(r.stdout or '') + (r.stderr or '')}")
+        doc = json.load(open(out))["content"]
+    finally:
+        if os.path.exists(out):
+            os.unlink(out)
+    bi = doc.get("bundle-info", {})
+    val = doc.get("validity", {})
+    return {
+        "path": os.path.abspath(p7b_path),
+        "type": doc.get("type"),
+        "bundle_name": bi.get("bundle-name"),
+        "apl": bi.get("apl"),
+        "app_feature": bi.get("app-feature"),
+        "developer_id": bi.get("developer-id"),
+        "not_before": val.get("not-before"),
+        "not_after": val.get("not-after"),
+        "expires": datetime.fromtimestamp(val["not-after"]).strftime("%Y-%m-%d")
+        if val.get("not-after") else None,
+        "days_left": (val["not-after"] - time.time()) // 86400 if val.get("not-after") else None,
+        "device_ids": (doc.get("debug-info") or {}).get("device-ids", []),
+        "allowed_acls": (doc.get("acls") or {}).get("allowed-acls", []),
+        "restricted": (doc.get("permissions") or {}).get("restricted-permissions", []),
+    }
+
+
+def sign_material(args, jar):
+    """Resolve p12 / cer / p7b / alias / password from flags, env or signing/."""
+    signing = args.signing_dir or _guess_signing_dir()
+    p12 = args.p12 or os.environ.get("HAPD_P12") or _first(signing, "*.p12")
+    cer = args.cert or os.environ.get("HAPD_CERT") or _first(signing, "*.cer")
+    p7b = args.profile or os.environ.get("HAPD_PROFILE") or _first(signing, "*.p7b")
+    pwd = args.password or os.environ.get("HAPD_P12_PWD")
+    alias = args.alias or os.environ.get("HAPD_ALIAS")
+
+    if not all([p12, cer, p7b]):
+        die("signing material not found. Pass --p12/--cert/--profile or set "
+            "HAPD_P12/HAPD_CERT/HAPD_PROFILE (or put them in ./signing/)", code=3)
+    if not pwd:
+        die("keystore password missing. Pass --password or set HAPD_P12_PWD", code=3)
+    if not alias:
+        alias = _first_alias(p12, pwd) or die("cannot guess key alias; pass --alias", code=3)
+    return p12, cer, p7b, alias, pwd
+
+
+def _guess_signing_dir():
+    for d in ("signing", "ednovas/signing", os.path.expanduser("~/.config/hapd/signing")):
+        if os.path.isdir(d):
+            return d
+    return "signing"
+
+
+def _first(d, pattern):
+    hits = sorted(glob.glob(os.path.join(d, pattern)), key=os.path.getmtime, reverse=True)
+    return hits[0] if hits else None
+
+
+def _first_alias(p12, pwd):
+    try:
+        r = subprocess.run(["keytool", "-list", "-keystore", p12, "-storetype", "pkcs12",
+                            "-storepass", pwd], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        for line in r.stdout.splitlines():
+            if "PrivateKeyEntry" in line:
+                return line.split(",")[0].strip()
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def do_sign(hap, out, args, jar):
+    p12, cer, p7b, alias, pwd = sign_material(args, jar)
+    prov = profile_info(p7b, jar)
+    info = hap_info(hap)
+
+    work = tempfile.mkdtemp(prefix="hapd-")
+    try:
+        src = hap
+
+        # 1. bundle name
+        if args.rename_bundle and args.rename_bundle != prov["bundle_name"]:
+            die(f"--rename-bundle must equal the profile's bundle name "
+                f"({prov['bundle_name']}), otherwise the device rejects the install.", code=2)
+        if info["bundle_name"] != prov["bundle_name"]:
+            if not args.rename_bundle:
+                die(f"bundle name mismatch:\n  hap     : {info['bundle_name']}\n"
+                    f"  profile : {prov['bundle_name']}\n"
+                    f"Re-run with --rename-bundle {prov['bundle_name']} to rewrite the HAP, "
+                    f"or create a profile for {info['bundle_name']}.", code=2)
+            tmp = os.path.join(work, "renamed.hap")
+            rewrite_hap(src, tmp, bundle_name=args.rename_bundle)
+            eprint(f"  bundle renamed: {info['bundle_name']} -> {args.rename_bundle}")
+            src = tmp
+
+        # 2. permissions
+        drop = list(args.drop_permission or [])
+        if args.strip_unsupported:
+            allowed = set(prov["allowed_acls"]) | set(prov["restricted"])
+            cur = hap_info(src)["permissions"]
+            drop += [p for p in cur if p not in allowed and p not in drop]
+        if drop:
+            tmp = os.path.join(work, "perms.hap")
+            rewrite_hap(src, tmp, drop_permissions=drop)
+            eprint(f"  permissions dropped: {', '.join(drop)}")
+            src = tmp
+
+        # 3. cert chain order
+        chain = os.path.join(work, "chain.pem")
+        order_chain(cer, chain)
+
+        # 4. sign
+        cmd = [java_cmd(), "-jar", jar, "sign-app",
+               "-keyAlias", alias, "-signAlg", "SHA256withECDSA", "-mode", "localSign",
+               "-appCertFile", chain, "-profileFile", p7b, "-inFile", src, "-outFile", out,
+               "-keystoreFile", p12, "-keyPwd", pwd, "-keystorePwd", pwd,
+               "-signCode", "0" if args.no_code_sign else "1"]
+        r = run(cmd, dry_run=args.dry_run, check=False)
+        text = (r.stdout or "") + (r.stderr or "")
+        if "sign-app success" not in text:
+            die("sign-app failed:\n" + text.strip(), code=4)
+
+        # 5. verify
+        vcer = os.path.join(work, "v.cer")
+        vp7b = os.path.join(work, "v.p7b")
+        r = run([java_cmd(), "-jar", jar, "verify-app", "-inFile", out,
+                 "-outCertChain", vcer, "-outProfile", vp7b], dry_run=args.dry_run, check=False)
+        vtext = (r.stdout or "") + (r.stderr or "")
+        if "verify-app success" not in vtext:
+            die("verify-app failed:\n" + vtext.strip(), code=4)
+
+        return {"out": os.path.abspath(out), "bundle": prov["bundle_name"],
+                "profile": prov["path"], "dropped": drop}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# device commands
+# --------------------------------------------------------------------------
+def hdc(args_list, hdc_path, dry_run=False, check=True):
+    return run([hdc_path] + args_list, dry_run=dry_run, check=check)
+
+
+def devices(hdc_path):
+    r = hdc(["list", "targets", "-v"], hdc_path, check=False)
+    out = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("[") or "Ver:" in line or "Empty" in line:
+            continue
+        parts = re.split(r"\s+", line)
+        out.append({"target": parts[0],
+                    "state": parts[2] if len(parts) > 2 else "?",
+                    "transport": parts[1] if len(parts) > 1 else "?"})
+    return out
+
+
+def pick_target(hdc_path, explicit=None):
+    if explicit:
+        return explicit
+    ds = [d for d in devices(hdc_path) if d["state"].lower() == "connected"]
+    if not ds:
+        return None
+    return ds[0]["target"]
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+def cmd_doctor(args, hdc_path, jar):
+    rep = {"hapd": VERSION, "checks": [], "ok": True}
+
+    def add(name, ok, detail):
+        rep["checks"].append({"name": name, "ok": ok, "detail": detail})
+        if not ok:
+            rep["ok"] = False
+
+    add("toolchain", True, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.dirname(hdc_path))))))
+    add("hdc", True, hdc_path)
+    add("hap-sign-tool", True, jar)
+    jv = shutil.which("java")
+    add("java", bool(jv), jv or "not found (JDK 17/21 required)")
+    add("openssl", bool(shutil.which("openssl")), shutil.which("openssl") or "not found")
+    add("keytool", bool(shutil.which("keytool")), shutil.which("keytool") or "not found")
+
+    info = hdc(["-v"], hdc_path, check=False)
+    add("hdc version", True, ((info.stdout or "") + (info.stderr or "")).strip())
+
+    ds = devices(hdc_path)
+    add("device", bool(ds), ", ".join(f"{d['target']}({d['state']})" for d in ds) or "none connected")
+
+    try:
+        p12, cer, p7b, alias, pwd = sign_material(args, jar)
+        prov = profile_info(p7b, jar)
+        add("signing material", True, f"p12={os.path.basename(p12)} alias={alias} "
+                                      f"profile={os.path.basename(p7b)}")
+        add("profile valid", (prov["days_left"] or 0) > 0,
+            f"bundle={prov['bundle_name']} expires={prov['expires']} "
+            f"({prov['days_left']} days left)")
+        if ds and prov["device_ids"]:
+            udid = device_udid(hdc_path, ds[0]["target"])
+            add("device in profile", udid in prov["device_ids"],
+                f"udid={udid[:16]}..." if udid else "cannot read UDID")
+    except SystemExit:
+        add("signing material", False,
+            "incomplete: need --p12/--cert/--profile and --password "
+            "(or HAPD_P12_PWD) or a ./signing/ directory")
+
+    if args.json:
+        print(json.dumps(rep, indent=2))
+    else:
+        print(f"hapd {VERSION}")
+        for c in rep["checks"]:
+            print(f"  [{'ok' if c['ok'] else '!!'}] {c['name']:<18} {c['detail']}")
+    return 0 if rep["ok"] else 1
+
+
+def device_udid(hdc_path, target):
+    r = hdc(["-t", target, "shell", "bm", "get", "--udid"], hdc_path, check=False)
+    m = re.search(r"([0-9A-Fa-f]{32,64})", (r.stdout or "") + (r.stderr or ""))
+    return m.group(1) if m else None
+
+
+def cmd_info(args, hdc_path, jar):
+    i = hap_info(args.hap)
+    if args.json:
+        print(json.dumps(i, indent=2))
+        return 0
+    print(f"path        : {i['path']}")
+    print(f"size        : {i['size'] / 1048576:.1f} MB")
+    print(f"bundleName  : {i['bundle_name']}")
+    print(f"version     : {i['version_name']} ({i['version_code']})")
+    print(f"api         : min {i['min_api']} -> target {i['target_api']}")
+    print(f"module      : {i['module_name']} / mainElement {i['main_element']}")
+    print(f"deviceTypes : {', '.join(i['device_types'] or [])}")
+    print(f"signed      : {i['signed']}")
+    print(f"permissions : {', '.join(i['permissions']) or '-'}")
+    print(f"abilities   : {', '.join(i['abilities']) or '-'}")
+    print(f"extensions  : {', '.join(i['extension_abilities']) or '-'}")
+    return 0
+
+
+def cmd_profiles(args, hdc_path, jar):
+    d = args.signing_dir or _guess_signing_dir()
+    rows = []
+    for p7b in sorted(glob.glob(os.path.join(d, "**", "*.p7b"), recursive=True)):
+        try:
+            rows.append(profile_info(p7b, jar))
+        except Exception as e:  # noqa: BLE001
+            rows.append({"path": p7b, "error": str(e)})
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    for r in rows:
+        if "error" in r:
+            print(f"{r['path']}: {r['error']}")
+            continue
+        print(f"{os.path.basename(r['path']):<28} {r['type']:<6} {r['bundle_name']:<32} "
+              f"expires {r['expires']} ({r['days_left']}d) devices={len(r['device_ids'])}")
+    return 0
+
+
+def cmd_sign(args, hdc_path, jar):
+    res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print(f"signed: {res['out']}")
+        print(f"bundle: {res['bundle']}")
+    return 0
+
+
+def _default_out(hap):
+    if hap.endswith("-unsigned.hap"):
+        return hap[: -len("-unsigned.hap")] + "-signed.hap"
+    return hap[: -len(".hap")] + "-signed.hap"
+
+
+def cmd_install(args, hdc_path, jar):
+    if args.sign:
+        res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
+        hap = res["out"]
+    else:
+        hap = args.hap
+    tgt = pick_target(hdc_path, args.target)
+    cmd = [hdc_path] + (["-t", tgt] if tgt else []) + ["install", "-r", hap]
+    r = run(cmd, dry_run=args.dry_run, check=False)
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    ok = "successfully" in txt
+    if args.json:
+        print(json.dumps({"ok": ok, "output": txt}, indent=2))
+    else:
+        print(txt)
+    return 0 if ok else 5
+
+
+def cmd_run(args, hdc_path, jar):
+    tgt = pick_target(hdc_path, args.target)
+    bundle = args.bundle
+    ability = args.ability
+    if not ability and args.hap:
+        ability = hap_info(args.hap)["main_element"]
+    ability = ability or "EntryAbility"
+    cmd = [hdc_path] + (["-t", tgt] if tgt else []) + \
+          ["shell", "aa", "start", "-a", ability, "-b", bundle, "-m", args.module]
+    r = run(cmd, dry_run=args.dry_run, check=False)
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if args.json:
+        print(json.dumps({"ok": "successfully" in txt, "output": txt}, indent=2))
+    else:
+        print(txt or "(no output)")
+    return 0 if "successfully" in txt or args.dry_run else 6
+
+
+def cmd_log(args, hdc_path, jar):
+    tgt = pick_target(hdc_path, args.target)
+    cmd = [hdc_path] + (["-t", tgt] if tgt else []) + ["shell", f"hilog -x"]
+    if args.filter:
+        cmd = [hdc_path] + (["-t", tgt] if tgt else []) + \
+              ["shell", f"hilog | grep -i {args.filter}"]
+    if args.dry_run:
+        eprint("[dry-run] " + " ".join(cmd))
+        return 0
+    os.execvp(cmd[0], cmd)
+
+
+def cmd_deploy(args, hdc_path, jar):
+    res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
+    hap, bundle = res["out"], res["bundle"]
+    if args.no_install:
+        print(hap)
+        return 0
+    rc = cmd_install(argparse.Namespace(hap=hap, sign=False, output=None, target=args.target,
+                                        json=args.json, dry_run=args.dry_run), hdc_path, jar)
+    if rc != 0:
+        return rc
+    if args.no_run:
+        return 0
+    return cmd_run(argparse.Namespace(bundle=bundle, ability=None, module="entry",
+                                      target=args.target, hap=hap, json=args.json,
+                                      dry_run=args.dry_run), hdc_path, jar)
+
+
+def cmd_update(args, hdc_path, jar):
+    src = args.source
+    if src.startswith(("http://", "https://")):
+        name = os.path.basename(src.split("?")[0])
+        dest = os.path.join(args.dir, name)
+        if not os.path.exists(dest):
+            if args.dry_run:
+                eprint(f"[dry-run] download {src} -> {dest}")
+                return 0
+            os.makedirs(args.dir, exist_ok=True)
+            run(["curl", "-fL", "--progress-bar", "-o", dest + ".part", src], capture=False)
+            os.replace(dest + ".part", dest)
+        src = dest
+    return cmd_deploy(argparse.Namespace(hap=src, output=args.output, p12=args.p12,
+                                         cert=args.cert, profile=args.profile,
+                                         password=args.password, alias=args.alias,
+                                         rename_bundle=args.rename_bundle,
+                                         drop_permission=args.drop_permission,
+                                         strip_unsupported=args.strip_unsupported,
+                                         no_code_sign=False, signing_dir=args.signing_dir,
+                                         no_install=args.no_install, no_run=args.no_run,
+                                         target=args.target, json=args.json,
+                                         dry_run=args.dry_run), hdc_path, jar)
+
+
+def cmd_explain(args, hdc_path, jar):
+    code = str(args.code).lower().replace("0x", "")
+    hit = ERRORS.get(code)
+    if not hit and code.startswith("error"):
+        hit = ERRORS.get(re.sub(r"\D", "", code))
+    if not hit:
+        die(f"unknown error code: {args.code}", code=2)
+    title, why, fix = hit
+    if args.json:
+        print(json.dumps({"code": code, "title": title, "why": why, "fix": fix}, indent=2))
+    else:
+        print(f"{code}: {title}\n  why: {why}\n  fix: {fix}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="hapd",
+        description="Sign, install and debug HarmonyOS HAP packages from Linux.")
+    p.add_argument("--version", action="version", version=f"hapd {VERSION}")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--dry-run", action="store_true", help="print commands instead of running")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def sign_opts(sp):
+        sp.add_argument("--p12")
+        sp.add_argument("--cert", help="debug certificate (.cer from AGC)")
+        sp.add_argument("--profile", help="debug profile (.p7b from AGC)")
+        sp.add_argument("--alias")
+        sp.add_argument("--password")
+        sp.add_argument("--signing-dir", help="directory holding .p12/.cer/.p7b")
+        sp.add_argument("--rename-bundle", metavar="NEW_NAME",
+                        help="rewrite app.bundleName inside the HAP")
+        sp.add_argument("--drop-permission", action="append", metavar="PERM")
+        sp.add_argument("--strip-unsupported", action="store_true",
+                        help="drop every permission the profile does not allow")
+        sp.add_argument("--no-code-sign", action="store_true",
+                        help="disable code signing (signCode 0)")
+
+    sp = sub.add_parser("doctor", help="check toolchain, signing material and device")
+    sign_opts(sp)
+    sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("devices", help="list connected devices")
+    sp.set_defaults(func=lambda a, h, j: (print(json.dumps(devices(h), indent=2))
+                                          if a.json else
+                                          [print(f"{d['target']:<24} {d['state']:<12} {d['transport']}")
+                                           for d in devices(h)]) and 0)
+
+    sp = sub.add_parser("udid", help="print the device UDID (needed for AGC)")
+    sp.add_argument("--target")
+    sp.set_defaults(func=lambda a, h, j: (print(device_udid(h, pick_target(h, a.target)) or
+                                               "not connected")) and 0)
+
+    sp = sub.add_parser("connect", help="connect over WLAN (hdc tconn ip:port)")
+    sp.add_argument("addr")
+    sp.set_defaults(func=lambda a, h, j: (print(hdc(["tconn", a.addr], h, a.dry_run,
+                                                   check=False).stdout.strip()) or "ok") and 0)
+
+    sp = sub.add_parser("info", help="inspect a HAP without touching a device")
+    sp.add_argument("hap")
+    sp.set_defaults(func=cmd_info)
+
+    sp = sub.add_parser("profiles", help="list local profiles with bundle/expiry")
+    sp.add_argument("--signing-dir")
+    sp.set_defaults(func=cmd_profiles)
+
+    sp = sub.add_parser("sign", help="sign a HAP")
+    sp.add_argument("hap")
+    sp.add_argument("-o", "--output")
+    sign_opts(sp)
+    sp.set_defaults(func=cmd_sign)
+
+    sp = sub.add_parser("install", help="install a HAP (optionally sign first)")
+    sp.add_argument("hap")
+    sp.add_argument("--sign", action="store_true", help="sign before installing")
+    sp.add_argument("-o", "--output")
+    sp.add_argument("--target")
+    sign_opts(sp)
+    sp.set_defaults(func=cmd_install)
+
+    sp = sub.add_parser("run", help="start an ability")
+    sp.add_argument("bundle")
+    sp.add_argument("--ability")
+    sp.add_argument("--module", default="entry")
+    sp.add_argument("--hap", help="read mainElement from this HAP")
+    sp.add_argument("--target")
+    sp.set_defaults(func=cmd_run)
+
+    sp = sub.add_parser("log", help="stream hilog (ctrl-c to stop)")
+    sp.add_argument("--filter")
+    sp.add_argument("--target")
+    sp.set_defaults(func=cmd_log)
+
+    sp = sub.add_parser("deploy", help="sign + install + run")
+    sp.add_argument("hap")
+    sp.add_argument("-o", "--output")
+    sp.add_argument("--target")
+    sp.add_argument("--no-install", action="store_true")
+    sp.add_argument("--no-run", action="store_true")
+    sign_opts(sp)
+    sp.set_defaults(func=cmd_deploy)
+
+    sp = sub.add_parser("update", help="download a build, then deploy it")
+    sp.add_argument("source", help="URL or local path")
+    sp.add_argument("--dir", default="dist")
+    sp.add_argument("-o", "--output")
+    sp.add_argument("--target")
+    sp.add_argument("--no-install", action="store_true")
+    sp.add_argument("--no-run", action="store_true")
+    sign_opts(sp)
+    sp.set_defaults(func=cmd_update)
+
+    sp = sub.add_parser("explain", help="decode a device error code")
+    sp.add_argument("code")
+    sp.set_defaults(func=cmd_explain)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    hdc_path, jar = find_toolchain()
+    try:
+        return args.func(args, hdc_path, jar)
+    except DryRun:
+        return 0
+    except RuntimeError as e:
+        die(str(e), code=4)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
