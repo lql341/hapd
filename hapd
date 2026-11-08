@@ -20,7 +20,7 @@ import time
 import zipfile
 from datetime import datetime
 
-VERSION = "0.3.4"   # keep in sync with ./VERSION and CHANGELOG.md
+VERSION = "0.3.5"   # keep in sync with ./VERSION and CHANGELOG.md
 
 # --------------------------------------------------------------------------
 # error codes seen while installing/debugging HAPs
@@ -606,6 +606,23 @@ def device_udid(hdc_path, target):
     return m.group(1) if m else None
 
 
+def installed_app(hdc_path, target, bundle):
+    """(versionName, versionCode, appIdentifier) of the installed bundle, or None."""
+    if not bundle or not target:
+        return None
+    r = hdc(["-t", target, "shell", "bm", "dump", "-n", bundle], hdc_path, check=False)
+    text = (r.stdout or "") + (r.stderr or "")
+    brace = text.find("{")
+    if brace < 0:
+        return None
+    try:
+        doc = json.loads(text[brace:])
+    except ValueError:
+        return None
+    app = doc.get("applicationInfo") or {}
+    return (app.get("versionName"), app.get("versionCode"), doc.get("appIdentifier"))
+
+
 def installed_version(hdc_path, target, bundle):
     """Return the installed versionCode for a bundle, or None."""
     if not bundle:
@@ -818,6 +835,13 @@ def cmd_install(args, hdc_path, jar):
             eprint(f"warning: installed {bundle} has versionCode {have}, this package has "
                    f"{pkg_code} -> the device will refuse it as a downgrade (9568263); "
                    f"use --replace to uninstall first (app data is lost)")
+
+    if not args.dry_run and bundle and tgt:
+        have = installed_app(hdc_path, tgt, bundle)
+        if have:
+            vname, vcode, _ = have
+            eprint(f"note: {bundle} is already installed ({vname} / {vcode}); "
+                   f"installing replaces it")
 
     results = []
     ok_all = True

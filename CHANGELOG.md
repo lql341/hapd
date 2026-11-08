@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5 - 2026-11-08
+
+- `install` reports what it is about to replace: `note: com.x is already installed
+  (1.1.85 / 1010850); installing replaces it`. Installing a package whose bundle
+  name collides with an unrelated app silently replaced it; that is how an
+  EdNovas install was overwritten by a FlClash build between two runs.
+- `installed_app()` returns versionName / versionCode / appIdentifier in one
+  `bm dump` call.
+
 ## 0.3.4 - 2026-11-08
 
 - **`--rename-bundle` is refused when the package's bytecode embeds its bundle
