@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The release number is no longer written out in the READMEs. Both said `0.3.0`
+  for five releases because the line had to be edited by hand; a shields.io badge
+  now tracks the git tag (`github/v/tag`), so it cannot go stale.
+- Guarded: a unit test fails if a README reintroduces a hardcoded hapd version,
+  and CI fails when a tagged commit's `VERSION` disagrees with its tag.
+
 ## 0.3.5 - 2026-11-08
 
 - `install` reports what it is about to replace: `note: com.x is already installed

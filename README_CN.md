@@ -3,7 +3,7 @@
 [English](README.md) | 中文
 
 [![validate](https://github.com/lql341/hapd/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/lql341/hapd/actions/workflows/validate.yml)
-当前版本：**0.3.0** · [CHANGELOG.md](CHANGELOG.md)
+[![release](https://img.shields.io/github/v/tag/lql341/hapd?label=release&color=blue)](https://github.com/lql341/hapd/releases) · [CHANGELOG.md](CHANGELOG.md)
 
 **在 Linux 上签名、安装、调试鸿蒙 HAP 包 —— 不需要 DevEco Studio，不需要 Windows 或 macOS。**
 

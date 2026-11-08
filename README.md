@@ -3,7 +3,7 @@
 [中文](README_CN.md) | English
 
 [![validate](https://github.com/lql341/hapd/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/lql341/hapd/actions/workflows/validate.yml)
-Current release: **0.3.0** · [CHANGELOG.md](CHANGELOG.md)
+[![release](https://img.shields.io/github/v/tag/lql341/hapd?label=release&color=blue)](https://github.com/lql341/hapd/releases) · [CHANGELOG.md](CHANGELOG.md)
 
 **Sign, install and debug HarmonyOS HAP packages from Linux — no DevEco Studio, no Windows, no macOS.**
 

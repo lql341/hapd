@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for the version check below
 
       - uses: actions/setup-python@v5
         with:
@@ -20,6 +22,18 @@ jobs:
 
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+
+      - name: Version metadata
+        run: |
+          v="$(tr -d '\n\r ' < VERSION)"
+          grep -q "^## ${v} " CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no '## ${v}' heading"; exit 1; }
+          tag="$(git describe --exact-match --tags HEAD 2>/dev/null || true)"
+          if [ -n "$tag" ] && [ "v${v}" != "$tag" ]; then
+            echo "::error::VERSION is ${v} but this commit is tagged ${tag}"
+            exit 1
+          fi
+          echo "VERSION=${v} tag=${tag:-<none>}"
 
       - name: CLI smoke test
         run: |

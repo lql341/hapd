@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -414,6 +415,23 @@ class TestConsistency(unittest.TestCase):
             m = [l for l in f if l.startswith("VERSION = ")]
         self.assertTrue(m, "VERSION assignment not found in hapd")
         self.assertIn(f'"{v}"', m[0], f"VERSION file says {v}, hapd says {m[0].strip()}")
+
+    def test_readmes_do_not_hardcode_release(self):
+        """The hapd release number in the READMEs comes from the badge, never a literal.
+
+        Both READMEs said 0.3.0 for five releases because the line had to be
+        edited by hand. The badge tracks the git tag instead; CLT / HarmonyOS
+        version numbers elsewhere in the READMEs are unrelated and allowed.
+        """
+        for name in ("README.md", "README_CN.md"):
+            with open(os.path.join(ROOT, name)) as f:
+                text = f.read()
+            self.assertIn("img.shields.io/github/v/tag/lql341/hapd", text,
+                          f"{name}: release badge missing")
+            stale = re.findall(r"\*\*0\.\d+\.\d+\*\*", text)
+            self.assertEqual(stale, [],
+                             f"{name}: release number hardcoded as {stale}; "
+                             f"link the release badge instead so it cannot go stale")
 
     def test_changelog_has_current_version(self):
         with open(os.path.join(ROOT, "VERSION")) as f:
