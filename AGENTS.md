@@ -5,6 +5,18 @@ Machine-oriented contract for driving `hapd`. Human docs: [README.md](README.md)
 `hapd` signs, installs and launches HarmonyOS HAP packages on a Linux host.
 It is a thin, deterministic wrapper around Huawei's `hdc` and `hap-sign-tool.jar`.
 
+## Bootstrap (once per machine)
+
+`hapd` needs Huawei's Command Line Tools (`hdc` + `hap-sign-tool.jar`); they are
+not packaged anywhere. If `hapd doctor` reports a missing toolchain, point the
+human at [docs/command-line-tools.md](docs/command-line-tools.md) — it has the
+download link, the JDK matrix, module setup and a login-free mirror fallback.
+Do not attempt to install a distro package for it: none exists.
+
+Signing material (`.p12` + `.cer` + `.p7b`) can only be produced through an
+interactive AppGallery Connect session. `hapd keygen` creates the `.p12`/`.csr`
+half, then a human must upload the CSR and download the certificate and profile.
+
 ## Invariants
 
 1. **Never commit or exfiltrate signing material.** `*.p12`, `*.p7b`, `*.cer`,
@@ -142,7 +154,30 @@ Launch and observe:
 ```bash
 hapd run com.example.app --ability EntryAbility
 hapd log --filter com.example.app      # streams hilog; long-running
+hapd screenshot -o shot.jpeg           # device screenshot
+hapd pull /data/local/tmp/x.log ./x.log
+hapd push ./config.json /data/local/tmp/config.json
 ```
+
+Let hapd repair common install failures itself:
+
+```bash
+hapd deploy ./app.hap --auto-fix        # 9568332 -> uninstall, 9568289 -> strip perms
+hapd deploy ./app.hap --auto-fix --max-fix 3
+```
+
+`--auto-fix` may **uninstall** the app, which destroys its data. Only use it when
+the user has agreed to that, and mention it in your summary.
+
+Verify signing material before a renewal deadline:
+
+```bash
+hapd --json renew --cert new.cer --profile new.p7b --old-cert old.cer --bundle com.example.app
+# {"ok": true, "overwrite_install_safe": true, ...}
+```
+
+`overwrite_install_safe: false` means an uninstall is required first, which
+destroys app data — surface that to the human before proceeding.
 
 ## Exit codes
 
@@ -163,7 +198,7 @@ hapd log --filter com.example.app      # streams hilog; long-running
 | `9568257 fail to verify pkcs7 file` | chain does not reach a trusted root (OpenHarmony community certs) | requires AGC debug material — human step |
 | `9568322` | HAP bundle ≠ profile bundle | `--rename-bundle <profile bundle>` (get it from `hapd --json profiles`) |
 | `9568289` | permission not granted by profile | add `--strip-unsupported` |
-| `9568332` | same bundle installed with another signature | retry with `--replace` (destroys app data) or uninstall first |
+| `9568332` | same bundle installed with another signature | `--replace` / `--auto-fix` (destroys app data) or uninstall first |
 | `9568266` | device UDID missing from profile | human must add device in AGC and download a new profile |
 | `Unauthorized` from `devices` | phone did not accept the debug authorization | ask human to unlock and tap "always allow" |
 | `verify certificate chain failed` | `.cer` was already leaf-first, or corrupted | re-download from AGC; `hapd` reorders automatically |

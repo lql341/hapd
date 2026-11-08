@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Syntax check
+        run: python3 -c "import ast,sys; ast.parse(open('hapd').read())"
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: CLI smoke test
+        run: |
+          ./hapd --version
+          ./hapd --json explain 9568257
+          ./hapd --help | grep -q 'hapd deploy'
+
+      - name: Shellcheck install.sh
+        run: shellcheck install.sh || true
+
+  no-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No signing material or app packages committed
+        run: |
+          if git ls-files | grep -Ei '\.(p12|p7b|cer|csr|keystore|jks|hap|hsp|app)$'; then
+            echo "::error::signing material or app package tracked in git"
+            exit 1
+          fi
+          if git ls-files | grep -q 'hapd.local.tcl'; then
+            echo "::error::machine-local overlay must not be committed"
+            exit 1
+          fi
+          echo "clean"

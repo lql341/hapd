@@ -40,20 +40,35 @@ profile/bundle matching and opaque error codes.
 | Huawei developer account | Free. Needed once, to obtain a **debug certificate** and a **debug profile** from AppGallery Connect. |
 | HarmonyOS device | With *Developer options → Wireless debugging* (or USB). |
 
-### Getting the Command Line Tools
+### Step 1 — install the Command Line Tools (the only awkward part)
 
-Download **Command Line Tools → Linux-x64** from
-<https://developer.huawei.com/consumer/cn/download/> (sign-in required):
+`hapd` is a thin wrapper; `hdc` and `hap-sign-tool.jar` come from Huawei's
+**Command Line Tools**. They are not packaged for any distro, so install them by
+hand, once:
 
 ```bash
+# 1. download commandline-tools-linux-x64-<version>.zip  (~2.3 GB)
+#    https://developer.huawei.com/consumer/cn/download/  -> "Command Line Tools" -> Linux-x64
+#    (a free Huawei developer account is required)
+# 2. unpack into a versioned directory
+mkdir -p ~/opt/apps/harmonyos
 unzip commandline-tools-linux-x64-<version>.zip -d ~/opt/apps/harmonyos/<version>
-# => ~/opt/apps/harmonyos/<version>/command-line-tools
+# 3. install the one dependency it needs
+sudo apt install unzip openssl openjdk-21-jdk-headless
+# 4. check
+~/opt/apps/harmonyos/<version>/command-line-tools/sdk/default/openharmony/toolchains/hdc -v
 ```
 
-`hapd` auto-discovers `~/opt/apps/harmonyos/*/command-line-tools` (newest first).
-Override with `HAPD_TOOLCHAIN` or `COMMANDLINE_TOOL_DIR`.
+Match the version to your device: **CLT 26.0.0.x ↔ HarmonyOS 7.0 / API 26 /
+JDK 21**, CLT 5.x ↔ HarmonyOS 5.x / JDK 17. `hapd` auto-discovers
+`~/opt/apps/harmonyos/*/command-line-tools` (newest first); override with
+`HAPD_TOOLCHAIN` or `COMMANDLINE_TOOL_DIR`.
 
-### Getting signing material (once)
+**Full guide — download, JDK matrix, PATH/module setup, shrinking the 7 GB
+install to 108 MB, and a login-free mirror fallback:
+[docs/command-line-tools.md](docs/command-line-tools.md).**
+
+### Step 2 — get signing material (once)
 
 A HAP must be signed with a certificate the device trusts. Community/OpenHarmony
 certificates are **rejected by commercial HarmonyOS devices** (`9568257`), so you
@@ -77,7 +92,7 @@ which keeps it out of your shell rc files and lets you pin or roll back versions
 git clone https://github.com/lql341/hapd.git ~/work/hapd
 cd ~/work/hapd
 ./install.sh                       # -> $MODULEFILES_DIR/hapd/<version>
-module load hapd/0.1.0
+module load hapd
 hapd --version
 ```
 
@@ -119,7 +134,7 @@ After that, `hapd doctor` and `hapd deploy` need no arguments or environment set
 ## Quick start
 
 ```bash
-module load hapd/0.1.0
+module load hapd
 
 # 1. Is everything in place?
 hapd doctor
@@ -149,9 +164,12 @@ hapd log --filter myapp
 | `hapd install <hap>` | Install (add `--sign` to sign first, `--uninstall` to replace, `--replace` to recover from `9568332`). |
 | `hapd uninstall <bundle>` | Remove a bundle (`--hap` reads the name from a package). |
 | `hapd keygen` | Create a `.p12` + `.csr` for AppGallery Connect. |
+| `hapd renew` | Compare new signing material with the current one before the certificate expires. |
+| `hapd screenshot` | Grab a device screenshot (`-o file`). |
+| `hapd push` / `hapd pull` | Move files to and from the device. |
 | `hapd run <bundle>` | Start an ability (`--hap` reads `mainElement` from the package). |
 | `hapd log [--filter X]` | Stream `hilog`. |
-| `hapd deploy <hap>` | sign → install → run. |
+| `hapd deploy <hap>` | sign → install → run (`--auto-fix` retries on `9568332` / `9568289`). |
 | `hapd update <url\|path>` | Download a build, then deploy. |
 | `hapd explain <code>` | Decode a device error code. |
 

@@ -40,20 +40,33 @@ Command Line Tools（`hdc` + `hap-sign-tool`）封装成一条非交互命令。
 | 华为开发者账号 | 免费。只需用一次，去 AGC 申请**调试证书**和**调试 Profile**。 |
 | 鸿蒙设备 | 开启 开发者选项 → 无线调试（或 USB）。 |
 
-### 获取 Command Line Tools
+### 第一步 —— 装 Command Line Tools（唯一麻烦的一步）
 
-到 <https://developer.huawei.com/consumer/cn/download/> 下载
-**Command Line Tools → Linux-x64**（需要登录）：
+`hapd` 只是个壳，`hdc` 和 `hap-sign-tool.jar` 都来自华为的
+**Command Line Tools**。它没有任何发行版打包，只能手动装一次：
 
 ```bash
-unzip commandline-tools-linux-x64-<version>.zip -d ~/opt/apps/harmonyos/<version>
-# => ~/opt/apps/harmonyos/<version>/command-line-tools
+# 1. 下载 commandline-tools-linux-x64-<版本>.zip（约 2.3 GB）
+#    https://developer.huawei.com/consumer/cn/download/  → "Command Line Tools" → Linux-x64
+#    （需要一个免费的华为开发者账号）
+# 2. 解压到带版本号的目录
+mkdir -p ~/opt/apps/harmonyos
+unzip commandline-tools-linux-x64-<版本>.zip -d ~/opt/apps/harmonyos/<版本>
+# 3. 装它唯一需要的依赖
+sudo apt install unzip openssl openjdk-21-jdk-headless
+# 4. 验证
+~/opt/apps/harmonyos/<版本>/command-line-tools/sdk/default/openharmony/toolchains/hdc -v
 ```
 
-`hapd` 会自动发现 `~/opt/apps/harmonyos/*/command-line-tools`（新版本优先）。
+版本要和设备对上：**CLT 26.0.0.x ↔ 鸿蒙 7.0 / API 26 / JDK 21**，
+CLT 5.x ↔ 鸿蒙 5.x / JDK 17。`hapd` 会自动发现
+`~/opt/apps/harmonyos/*/command-line-tools`（新版本优先），
 也可以用 `HAPD_TOOLCHAIN` 或 `COMMANDLINE_TOOL_DIR` 指定。
 
-### 获取签名材料（一次性的）
+**完整指南（下载细节、JDK 版本对照、PATH/module 配置、把 7 GB 裁到 108 MB、
+以及免登录的镜像替代方案）：[docs/command-line-tools.md](docs/command-line-tools.md)。**
+
+### 第二步 —— 获取签名材料（一次性的）
 
 HAP 必须用设备信任的证书签名。**OpenHarmony 社区证书在商业鸿蒙设备上会被拒绝**
 （`9568257`），所以必须用 AGC 的材料：
@@ -75,7 +88,7 @@ HAP 必须用设备信任的证书签名。**OpenHarmony 社区证书在商业�
 git clone https://github.com/lql341/hapd.git ~/work/hapd
 cd ~/work/hapd
 ./install.sh                       # -> $MODULEFILES_DIR/hapd/<版本号>
-module load hapd/0.1.0
+module load hapd
 hapd --version
 ```
 
@@ -116,7 +129,7 @@ setenv HAPD_ALIAS    my-key
 ## 快速开始
 
 ```bash
-module load hapd/0.1.0
+module load hapd
 
 # 1. 环境体检
 hapd doctor
@@ -146,9 +159,12 @@ hapd log --filter myapp
 | `hapd install <hap>` | 安装（`--sign` 先签名，`--uninstall` 先卸载，`--replace` 从 `9568332` 自动恢复） |
 | `hapd uninstall <bundle>` | 卸载（`--hap` 从包里读包名） |
 | `hapd keygen` | 生成 AGC 要用的 `.p12` + `.csr` |
+| `hapd renew` | 证书到期前，比对新的签名材料与当前的是否同一身份 |
+| `hapd screenshot` | 截图（`-o 文件`） |
+| `hapd push` / `hapd pull` | 往设备传文件 / 从设备取文件 |
 | `hapd run <bundle>` | 启动 Ability（`--hap` 可从包里读 `mainElement`） |
 | `hapd log [--filter X]` | 跟 hilog |
-| `hapd deploy <hap>` | 签名 → 安装 → 启动 |
+| `hapd deploy <hap>` | 签名 → 安装 → 启动（`--auto-fix` 遇 `9568332`/`9568289` 自动重试） |
 | `hapd update <url\|路径>` | 下载新构建后直接部署 |
 | `hapd explain <code>` | 解释设备错误码 |
 

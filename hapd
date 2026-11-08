@@ -20,7 +20,7 @@ import time
 import zipfile
 from datetime import datetime
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # --------------------------------------------------------------------------
 # error codes seen while installing/debugging HAPs
@@ -517,6 +517,19 @@ def cmd_info(args, hdc_path, jar):
     print(f"module      : {i['module_name']} / mainElement {i['main_element']}")
     print(f"deviceTypes : {', '.join(i['device_types'] or [])}")
     print(f"signed      : {i['signed']}")
+    if getattr(args, "verify", False):
+        tmp = tempfile.mkdtemp(prefix="hapd-v-")
+        try:
+            r = run([java_cmd(), "-jar", jar, "verify-app", "-inFile", args.hap,
+                     "-outCertChain", os.path.join(tmp, "c.cer"),
+                     "-outProfile", os.path.join(tmp, "p.p7b")], check=False)
+            txt = (r.stdout or "") + (r.stderr or "")
+            ok = "verify-app success" in txt
+            print(f"verify-app  : {'ok' if ok else 'FAILED'}")
+            if not ok:
+                print("              " + txt.strip().splitlines()[-1] if txt.strip() else "")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
     print(f"permissions : {', '.join(i['permissions']) or '-'}")
     print(f"abilities   : {', '.join(i['abilities']) or '-'}")
     print(f"extensions  : {', '.join(i['extension_abilities']) or '-'}")
@@ -559,6 +572,13 @@ def _default_out(hap):
     return hap[: -len(".hap")] + "-signed.hap"
 
 
+def _install_once(hdc_path, target, hap, dry_run=False):
+    cmd = [hdc_path] + (["-t", target] if target else []) + ["install", "-r", hap]
+    r = run(cmd, dry_run=dry_run, check=False)
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    return "successfully" in txt, txt
+
+
 def cmd_install(args, hdc_path, jar):
     if args.sign:
         res = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
@@ -576,18 +596,13 @@ def cmd_install(args, hdc_path, jar):
         ok, txt = _uninstall(hdc_path, tgt, bundle, args.dry_run)
         eprint(f"  uninstall {bundle}: {'ok' if ok else 'not installed'}")
 
-    cmd = [hdc_path] + (["-t", tgt] if tgt else []) + ["install", "-r", hap]
-    r = run(cmd, dry_run=args.dry_run, check=False)
-    txt = ((r.stdout or "") + (r.stderr or "")).strip()
-    ok = "successfully" in txt
+    ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
 
     # same bundle already installed with another signature -> replace it
     if not ok and bundle and getattr(args, "replace", False) and "9568332" in txt:
         eprint(f"  9568332: signature differs, replacing installed {bundle}")
         _uninstall(hdc_path, tgt, bundle, args.dry_run)
-        r = run(cmd, dry_run=args.dry_run, check=False)
-        txt = ((r.stdout or "") + (r.stderr or "")).strip()
-        ok = "successfully" in txt
+        ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
 
     if args.json:
         print(json.dumps({"ok": ok, "bundle": bundle, "output": txt}, indent=2))
@@ -644,6 +659,127 @@ def cmd_log(args, hdc_path, jar):
     os.execvp(cmd[0], cmd)
 
 
+def cmd_screenshot(args, hdc_path, jar):
+    tgt = pick_target(hdc_path, args.target)
+    remote = "/data/local/tmp/hapd-shot.jpeg"
+    r = run([hdc_path] + (["-t", tgt] if tgt else []) +
+            ["shell", "snapshot_display", "-f", remote], dry_run=args.dry_run, check=False)
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if "success" not in txt.lower() and not args.dry_run:
+        die("screenshot failed: " + txt, code=6)
+    out = args.output
+    run([hdc_path] + (["-t", tgt] if tgt else []) + ["file", "recv", remote, out],
+        dry_run=args.dry_run)
+    run([hdc_path] + (["-t", tgt] if tgt else []) + ["shell", "rm", "-f", remote],
+        dry_run=args.dry_run, check=False)
+    if args.json:
+        print(json.dumps({"output": os.path.abspath(out)}, indent=2))
+    else:
+        print(os.path.abspath(out))
+    return 0
+
+
+def cmd_push(args, hdc_path, jar):
+    tgt = pick_target(hdc_path, args.target)
+    run([hdc_path] + (["-t", tgt] if tgt else []) + ["file", "send", args.local, args.remote],
+        dry_run=args.dry_run)
+    print(f"{args.local} -> {args.remote}")
+    return 0
+
+
+def cmd_pull(args, hdc_path, jar):
+    tgt = pick_target(hdc_path, args.target)
+    out = args.local or os.path.basename(args.remote.rstrip("/")) or "pulled"
+    run([hdc_path] + (["-t", tgt] if tgt else []) + ["file", "recv", args.remote, out],
+        dry_run=args.dry_run)
+    print(out)
+    return 0
+
+
+def pubkey_fp(pem):
+    """SHA-256 of the SubjectPublicKeyInfo DER - stable across certificate reissues
+    as long as the key pair is the same."""
+    import hashlib
+    r = subprocess.run(["openssl", "x509", "-pubkey", "-noout"],
+                       input=pem.encode(), capture_output=True)
+    if r.returncode != 0:
+        return None
+    r2 = subprocess.run(["openssl", "pkey", "-pubin", "-outform", "DER"],
+                        input=r.stdout, capture_output=True)
+    return hashlib.sha256(r2.stdout).hexdigest() if r2.returncode == 0 else None
+
+
+def _cert_pubkey_fp(cert_path):
+    if not os.path.isfile(cert_path):
+        return None
+    text = open(cert_path, encoding="utf-8", errors="ignore").read()
+    pems = _pem_blocks(text)
+    if not pems:
+        return None
+    leaf = pems[0] if len(pems) > 1 else pems[0]
+    # AGC ships root-first; the leaf is the one that is not a CA issuer
+    try:
+        subjects = {_cert_field(c, "subject") for c in pems}
+        leaves = [c for c in pems if _cert_field(c, "issuer") not in subjects] or pems
+        leaf = leaves[0]
+    except Exception:  # noqa: BLE001
+        pass
+    return pubkey_fp(leaf)
+
+
+def cmd_renew(args, hdc_path, jar):
+    """Compare replacement signing material with what is currently in use."""
+    old_cert = args.old_cert or os.environ.get("HAPD_CERT")
+    new_cert = args.cert or os.environ.get("HAPD_CERT")
+    new_p7b = args.profile or os.environ.get("HAPD_PROFILE")
+    if not new_p7b or not os.path.isfile(new_p7b):
+        die("need the NEW profile: --profile new.p7b (or set HAPD_PROFILE)", code=2)
+
+    prov = profile_info(new_p7b, jar)
+    rep = {"profile": prov, "checks": [], "ok": True}
+
+    def add(name, ok, detail):
+        rep["checks"].append({"name": name, "ok": ok, "detail": detail})
+        if not ok:
+            rep["ok"] = False
+
+    add("profile valid", (prov["days_left"] or 0) > 0,
+        f"expires {prov['expires']} ({prov['days_left']} days left)")
+    add("profile type", prov["type"] == "debug", f"type={prov['type']}")
+
+    if args.bundle:
+        add("bundle match", args.bundle == prov["bundle_name"],
+            f"expected {args.bundle}, profile has {prov['bundle_name']}")
+
+    tgt = pick_target(hdc_path, args.target)
+    udid = device_udid(hdc_path, tgt) if tgt else None
+    if udid:
+        add("device in profile", udid in prov["device_ids"],
+            f"{udid[:16]}... in {len(prov['device_ids'])} device id(s)")
+
+    if old_cert and new_cert and os.path.isfile(old_cert) and os.path.isfile(new_cert)             and os.path.abspath(old_cert) != os.path.abspath(new_cert):
+        old_fp = _cert_pubkey_fp(old_cert)
+        new_fp = _cert_pubkey_fp(new_cert)
+        same = bool(old_fp) and old_fp == new_fp
+        add("same signing identity", same,
+            "public keys match -> the new build can be installed over the old one, "
+            "app data is kept" if same else
+            "public keys DIFFER -> an uninstall is required first, app data is lost")
+        rep["overwrite_install_safe"] = same
+
+    if args.json:
+        print(json.dumps(rep, indent=2))
+    else:
+        for c in rep["checks"]:
+            print(f"  [{'ok' if c['ok'] else '!!'}] {c['name']:<22} {c['detail']}")
+        if "overwrite_install_safe" in rep:
+            print()
+            print("overwrite install keeps app data"
+                  if rep["overwrite_install_safe"] else
+                  "uninstall required first: app data will be lost")
+    return 0 if rep["ok"] else 1
+
+
 def cmd_keygen(args, hdc_path, jar):
     """Generate a keystore + certificate signing request the AGC way."""
     os.makedirs(args.out, exist_ok=True)
@@ -678,6 +814,13 @@ def cmd_keygen(args, hdc_path, jar):
     return 0
 
 
+def _hint_for(text):
+    for code, (_, _, fix) in ERRORS.items():
+        if code in text:
+            return f"{code}: {fix}"
+    return None
+
+
 def _preflight(args, hdc_path, jar, bundle):
     """Warn (do not fail) when the device cannot possibly accept this bundle."""
     tgt = pick_target(hdc_path, args.target)
@@ -705,11 +848,36 @@ def cmd_deploy(args, hdc_path, jar):
         print(hap)
         return 0
     _preflight(args, hdc_path, jar, bundle)
-    rc = cmd_install(argparse.Namespace(hap=hap, sign=False, output=None, target=args.target,
-                                        json=args.json, dry_run=args.dry_run,
-                                        uninstall=False, replace=args.replace), hdc_path, jar)
-    if rc != 0:
-        return rc
+    tgt = pick_target(hdc_path, args.target)
+    ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
+
+    for attempt in range(1, args.max_fix + 1 if args.auto_fix else 1):
+        if ok:
+            break
+        if "9568332" in txt:                        # signature changed
+            eprint(f"  [auto-fix {attempt}] 9568332: uninstalling {bundle}")
+            _uninstall(hdc_path, tgt, bundle, args.dry_run)
+            ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
+        elif "9568289" in txt and not args.strip_unsupported:   # ACL denied
+            eprint(f"  [auto-fix {attempt}] 9568289: stripping unsupported permissions")
+            args.strip_unsupported = True
+            hp = do_sign(args.hap, args.output or _default_out(args.hap), args, jar)
+            hap = hp["out"]
+            ok, txt = _install_once(hdc_path, tgt, hap, args.dry_run)
+        else:
+            break
+
+    if not ok:
+        if args.json:
+            print(json.dumps({"ok": False, "bundle": bundle, "output": txt}, indent=2))
+        else:
+            print(txt)
+        hint = _hint_for(txt)
+        if hint:
+            eprint("hint: " + hint)
+        return 5
+    if not args.json:
+        print(txt)
     if args.no_run:
         return 0
     return cmd_run(argparse.Namespace(bundle=bundle, ability=None, module="entry",
@@ -738,7 +906,8 @@ def cmd_update(args, hdc_path, jar):
                                          strip_unsupported=args.strip_unsupported,
                                          no_code_sign=False, signing_dir=args.signing_dir,
                                          no_install=args.no_install, no_run=args.no_run,
-                                         replace=args.replace, target=args.target, json=args.json,
+                                         replace=args.replace, auto_fix=args.auto_fix,
+                                         max_fix=args.max_fix, target=args.target, json=args.json,
                                          dry_run=args.dry_run), hdc_path, jar)
 
 
@@ -806,6 +975,7 @@ def build_parser():
 
     sp = sub.add_parser("info", help="inspect a HAP without touching a device")
     sp.add_argument("hap")
+    sp.add_argument("--verify", action="store_true", help="also run verify-app")
     sp.set_defaults(func=cmd_info)
 
     sp = sub.add_parser("profiles", help="list local profiles with bundle/expiry")
@@ -835,6 +1005,31 @@ def build_parser():
     sp.add_argument("--hap", help="read the bundle name from this HAP instead")
     sp.add_argument("--target")
     sp.set_defaults(func=cmd_uninstall)
+
+    sp = sub.add_parser("screenshot", help="grab a device screenshot")
+    sp.add_argument("-o", "--output", default="screenshot.jpeg")
+    sp.add_argument("--target")
+    sp.set_defaults(func=cmd_screenshot)
+
+    sp = sub.add_parser("push", help="push a file to the device")
+    sp.add_argument("local")
+    sp.add_argument("remote")
+    sp.add_argument("--target")
+    sp.set_defaults(func=cmd_push)
+
+    sp = sub.add_parser("pull", help="pull a file from the device")
+    sp.add_argument("remote")
+    sp.add_argument("local", nargs="?")
+    sp.add_argument("--target")
+    sp.set_defaults(func=cmd_pull)
+
+    sp = sub.add_parser("renew", help="check replacement signing material before it expires")
+    sp.add_argument("--cert", help="new debug certificate")
+    sp.add_argument("--old-cert", help="certificate currently in use (default: HAPD_CERT)")
+    sp.add_argument("--profile", help="new debug profile")
+    sp.add_argument("--bundle", help="expected bundle name")
+    sp.add_argument("--target")
+    sp.set_defaults(func=cmd_renew)
 
     sp = sub.add_parser("keygen", help="create a keystore (.p12) and CSR for AGC")
     sp.add_argument("--name", default="hapd-key", help="file stem (default: hapd-key)")
@@ -867,6 +1062,9 @@ def build_parser():
     sp.add_argument("--no-run", action="store_true")
     sp.add_argument("--replace", action="store_true",
                     help="on 9568332 uninstall the installed build and retry")
+    sp.add_argument("--auto-fix", action="store_true",
+                    help="retry automatically: 9568332 -> uninstall, 9568289 -> strip permissions")
+    sp.add_argument("--max-fix", type=int, default=3)
     sign_opts(sp)
     sp.set_defaults(func=cmd_deploy)
 
@@ -877,6 +1075,9 @@ def build_parser():
     sp.add_argument("--target")
     sp.add_argument("--no-install", action="store_true")
     sp.add_argument("--no-run", action="store_true")
+    sp.add_argument("--replace", action="store_true")
+    sp.add_argument("--auto-fix", action="store_true")
+    sp.add_argument("--max-fix", type=int, default=3)
     sign_opts(sp)
     sp.set_defaults(func=cmd_update)
 

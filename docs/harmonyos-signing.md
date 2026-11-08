@@ -1,5 +1,8 @@
 # How HarmonyOS signing actually works
 
+Prerequisite: a working HarmonyOS Command Line Tools install — see
+[command-line-tools.md](command-line-tools.md).
+
 Everything here was established empirically on a commercial device
 (HUAWEI Mate 70 Pro+, HarmonyOS 7.0.0.111, API 26) using
 HarmonyOS Command Line Tools 26.0.0.865 on Debian 13.
