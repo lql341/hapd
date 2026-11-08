@@ -24,8 +24,9 @@ jobs:
       - name: CLI smoke test
         run: |
           ./hapd --version
-          ./hapd --json explain 9568257
-          ./hapd --help | grep -q 'hapd deploy'
+          ./hapd --json explain 9568257 | grep -q 9568257
+          ./hapd --help | grep -qw deploy
+          ./hapd --help | grep -qw renew
 
       - name: Shellcheck install.sh
         run: shellcheck install.sh || true
