@@ -291,13 +291,38 @@ class TestCliOffline(TempDir):
 
 
 class TestVersionParsing(unittest.TestCase):
-    def test_picks_the_bundle_version(self):
+    def test_picks_the_bundle_version_not_a_dependency(self):
+        # a shared-bundle dependency carries a much larger, date-based code
+        dump = """
+        {
+            "appId": "com.x_y",
+            "applicationInfo": {
+                "versionCode": 1010850,
+                "minCompatibleVersionCode": 1010850
+            },
+            "hspList": [{"versionCode": 2026110201}],
+            "entryModuleName": "entry"
+        }
+        """
+        self.assertEqual(hapd.parse_version_code(dump), 1010850)
+
+    def test_ignores_nested_module_application_info(self):
+        # real `bm dump` output has a nested applicationInfo with versionCode 0
         dump = (
-            '{"appId": "com.x_y", "versionCode": 0,'
-            ' "applicationInfo": {"versionCode": 2026110201,'
-            ' "minCompatibleVersionCode": 2026110201}}'
+            'org.xbgroup.clashbox:\n'
+            '{\n'
+            '    "applicationInfo": {\n'
+            '        "name": "x"\n'
+            '    },\n'
+            '    "moduleInfos": [{"applicationInfo": {"versionCode": 0}}],\n'
+            '    "versionCode": 2010016\n'
+            '}'
         )
-        self.assertEqual(hapd.parse_version_code(dump), 2026110201)
+        self.assertEqual(hapd.parse_version_code(dump), 2010016)
+
+    def test_falls_back_to_top_level(self):
+        dump = '{\n    "versionCode": 42,\n    "appId": "com.x_y"\n}'
+        self.assertEqual(hapd.parse_version_code(dump), 42)
 
     def test_returns_none_when_absent(self):
         self.assertIsNone(hapd.parse_version_code("error: bundle not found"))

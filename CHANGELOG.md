@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 - 2026-11-08
+
+- Fix `parse_version_code`: `bm dump -n` output contains a nested
+  `applicationInfo` with `versionCode: 0` plus date-based dependency and
+  `minCompatibleVersionCode` values. The previous "take the maximum" heuristic
+  reported a dependency's code as the package's own, producing a bogus
+  "version downgrade" warning. It now parses the JSON payload and reads the
+  top-level `applicationInfo.versionCode`.
+- 33 tests, including a fixture shaped like real `bm dump` output.
+
 ## 0.3.1 - 2026-11-08
 
 - Add `9568263` (version downgrade) and `9568386` (bundle not installed) to the

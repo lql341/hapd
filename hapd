@@ -20,7 +20,7 @@ import time
 import zipfile
 from datetime import datetime
 
-VERSION = "0.3.1"   # keep in sync with ./VERSION and CHANGELOG.md
+VERSION = "0.3.2"   # keep in sync with ./VERSION and CHANGELOG.md
 
 # --------------------------------------------------------------------------
 # error codes seen while installing/debugging HAPs
@@ -547,12 +547,31 @@ def installed_version(hdc_path, target, bundle):
 def parse_version_code(bm_dump_text):
     """Pull the bundle's own versionCode out of `bm dump` output.
 
-    The dump contains several "versionCode" keys (dependencies, minCompatible…);
-    the bundle's own one is the last top-of-record occurrence, so take the
-    maximum seen - that is the app's own code in every layout observed.
+    Careful: the dump is large and full of decoys - shared-bundle dependencies,
+    nested `applicationInfo` records in module info (versionCode 0), and
+    `minCompatibleVersionCode` (often date-based, e.g. 2026110201). Take the
+    top-level `applicationInfo.versionCode` from the parsed JSON; only fall back
+    to a regex when the payload is not valid JSON.
     """
-    codes = [int(m) for m in re.findall(r'"versionCode":\s*(\d+)', bm_dump_text)]
-    return max(codes) if codes else None
+    text = bm_dump_text.strip()
+    # `bm dump -n <bundle>` prefixes the payload with "<bundle>:" on its own line
+    brace = text.find("{")
+    if brace > 0:
+        text = text[brace:]
+    try:
+        doc = json.loads(text)
+    except (ValueError, TypeError):
+        doc = None
+    if isinstance(doc, dict):
+        app = doc.get("applicationInfo")
+        if isinstance(app, dict) and isinstance(app.get("versionCode"), int):
+            if app["versionCode"]:
+                return app["versionCode"]
+        if isinstance(doc.get("versionCode"), int) and doc["versionCode"]:
+            return doc["versionCode"]
+        return None
+    m = re.search(r'^    "versionCode"\s*:\s*(\d+)', bm_dump_text, re.M)
+    return int(m.group(1)) if m else None
 
 
 def cmd_devices(args, hdc_path, jar):
