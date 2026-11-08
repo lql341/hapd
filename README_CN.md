@@ -1,5 +1,7 @@
 # hapd
 
+[English](README.md) | 中文
+
 **在 Linux 上签名、安装、调试鸿蒙 HAP 包 —— 不需要 DevEco Studio，不需要 Windows 或 macOS。**
 
 `hapd` 是一个单文件、零第三方依赖的 Python CLI，把华为官方的 HarmonyOS
@@ -8,7 +10,6 @@ Command Line Tools（`hdc` + `hap-sign-tool`）封装成一条非交互命令。
 存在的原因：华为没有 Linux 版 DevEco Studio；而手敲 `hdc` / `hap-sign-tool`
 是一路地雷——证书链顺序、Profile 与包名的匹配、以及一堆没有文档的错误码。
 
-> English: [README.md](README.md)
 > 鸿蒙签名机制的深入说明：[docs/harmonyos-signing.md](docs/harmonyos-signing.md)
 
 ---

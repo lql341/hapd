@@ -1,5 +1,7 @@
 # hapd
 
+[中文](README_CN.md) | English
+
 **Sign, install and debug HarmonyOS HAP packages from Linux — no DevEco Studio, no Windows, no macOS.**
 
 `hapd` is a single-file, dependency-free Python CLI that wraps the official
@@ -8,8 +10,7 @@ interface. It exists because Huawei ships no DevEco Studio for Linux, and drivin
 `hdc` / `hap-sign-tool` by hand is a minefield of certificate-chain ordering,
 profile/bundle matching and opaque error codes.
 
-> 中文文档: [README.zh-CN.md](README.zh-CN.md)
-> Deeper background on how HarmonyOS signing actually works: [docs/harmonyos-signing.md](docs/harmonyos-signing.md)
+> How HarmonyOS signing actually works: [docs/harmonyos-signing.md](docs/harmonyos-signing.md)
 
 ---
 
